@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Local plugin job/state caches
+.zai/
+.omc/state/
+
+# OS / editor noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local config / secrets — Z.AI tokens never enter the repo
+.env
+.env.local
+zai-config.json
