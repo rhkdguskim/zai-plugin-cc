@@ -111,7 +111,7 @@ async function cmdSetup(argv) {
 }
 
 async function cmdAsk(argv) {
-  const { positional } = parseFlags(argv);
+  const { flags, positional } = parseFlags(argv);
   const question = positional.join(' ').trim();
   if (!question) {
     console.error('Usage: ask <message>');
@@ -122,6 +122,7 @@ async function cmdAsk(argv) {
       kind: 'ask',
       messages: prompts.buildAsk(question),
       requestSummary: { question },
+      model: flags.model,
     });
     process.stdout.write(out.text + '\n');
     process.stdout.write(`\n— glm/${out.model} · ${fmtElapsed(job.started_at)} · job ${job.id}\n`);
