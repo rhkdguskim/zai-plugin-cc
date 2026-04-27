@@ -7,6 +7,7 @@ import * as client from './lib/client.mjs';
 import * as jobs from './lib/jobs.mjs';
 import * as runner from './lib/runner.mjs';
 import * as prompts from './lib/prompts.mjs';
+import { parseFlags, FlagError } from './lib/flags.mjs';
 
 const HELP = `zai-companion — sidekick runtime for the zai-plugin-cc Claude Code plugin
 
@@ -20,30 +21,21 @@ Usage:
   node zai-companion.mjs result   <job-id>
   node zai-companion.mjs cancel   <job-id>
 
+Default model mapping (Z.AI Coding Plan):
+  ask      -> glm-4.5-air   (fast single-shot Q&A)
+  code     -> glm-5.1       (latest flagship coding model)
+  review   -> glm-5.1
+  consult  -> glm-5.1
+Per-mode overrides go in ~/.config/zai-plugin-cc/config.json under "models".
+Per-call override: --model <id>   (e.g. glm-4.7, glm-5-turbo, glm-5)
+
 Env:
   ZAI_API_KEY         Override stored API key
-  ZAI_BASE_URL        Override base URL (default https://api.z.ai/api/paas/v4)
-  ZAI_DEFAULT_MODEL   Default model for code/review/consult (default glm-4.6)
-  ZAI_LIGHT_MODEL     Default model for ask (default glm-4.5-air)
+  ZAI_BASE_URL        Override base URL (default https://api.z.ai/api/anthropic)
+  ZAI_DEFAULT_MODEL   Override model for code/review/consult (default glm-5.1)
+  ZAI_LIGHT_MODEL     Override model for ask (default glm-4.5-air)
   ZAI_DEBUG=1         Trace HTTP requests
 `;
-
-function parseFlags(argv) {
-  const flags = {};
-  const positional = [];
-  for (let i = 0; i < argv.length; i += 1) {
-    const a = argv[i];
-    if (a === '--background') flags.background = true;
-    else if (a === '--wait') flags.wait = true;
-    else if (a === '--model') flags.model = argv[++i];
-    else if (a === '--base') flags.base = argv[++i];
-    else if (a === '--key') flags.key = argv[++i];
-    else if (a === '--reset') flags.reset = true;
-    else if (a === '--json') flags.json = true;
-    else positional.push(a);
-  }
-  return { flags, positional };
-}
 
 function fmtElapsed(start, end) {
   if (!start) return '-';
@@ -89,23 +81,32 @@ async function cmdSetup(argv) {
   const baseDefaults = config.defaults();
   const baseUrl = process.env.ZAI_BASE_URL || baseDefaults.base_url;
 
-  process.stdout.write('Verifying key against Z.AI...\n');
-  let models = [];
-  try {
-    models = await client.listModels({ apiKey, baseUrl });
-  } catch (err) {
-    console.error(`✗ Verification failed: ${err.message}`);
-    console.error('  (key NOT saved)');
+  process.stdout.write('Verifying key against Z.AI Anthropic-compat surface...\n');
+  const verdict = await client.verifyKey({ apiKey, baseUrl, model: baseDefaults.light_model });
+  if (!verdict.ok) {
+    console.error(`✗ Verification failed (HTTP ${verdict.status}): ${verdict.detail}`);
+    console.error('  Key NOT saved.');
+    if (verdict.status === 401 || verdict.status === 403) {
+      console.error('  Hint: regenerate the key at https://z.ai/model-api');
+    } else if (verdict.body?.error?.code === '1113') {
+      console.error('  Hint: Coding Pro plan quota covers only the /api/anthropic endpoint.');
+    }
     return 1;
   }
 
-  await config.save({ ...baseDefaults, api_key: apiKey, base_url: baseUrl });
+  // Preserve any user customization that already lived in the config file.
+  const existing = (await config.load()) || {};
+  await config.save({ ...baseDefaults, ...existing, api_key: apiKey, base_url: baseUrl });
   console.log(`✓ Key saved to ${config.configPath()} (mode 0600)`);
+  console.log(`✓ Key accepted (probe model: ${verdict.model}).`);
+
+  let models = [];
+  try {
+    models = await client.listModels({ apiKey, baseUrl });
+  } catch {}
   if (models.length) {
-    const sample = models.slice(0, 8).join(', ');
-    console.log(`✓ Available models: ${sample}${models.length > 8 ? ` ... (+${models.length - 8})` : ''}`);
-  } else {
-    console.log('✓ Key accepted (no model list returned).');
+    const sample = models.slice(0, 10).join(', ');
+    console.log(`✓ Known models: ${sample}${models.length > 10 ? ` ... (+${models.length - 10})` : ''}`);
   }
   return 0;
 }
@@ -262,7 +263,13 @@ async function main() {
     return 0;
   }
 
-  // Best-effort GC of old jobs on every entry
+  // Best-effort GC of old jobs on every entry. Reconciliation of stale
+  // 'running' records does NOT run here: a fresh background job has a brief
+  // window between create() and the parent's pid stamp, and a reconcile
+  // pass landing inside that window would falsely flip the new job to
+  // 'error/orphaned'. The kill guard inside `cancel` itself already keeps
+  // stale records from triggering the broadcast bug; full reconcile is
+  // deferred to the SessionEnd hook (see `__reconcile`).
   jobs.gcOlderThanDays(14).catch(() => {});
 
   switch (cmd) {
@@ -280,6 +287,13 @@ async function main() {
       await runner.runWorker(id);
       return 0;
     }
+    case '__reconcile': {
+      // Internal entrypoint for the SessionEnd hook. Flips orphaned 'running'
+      // job records to status='error' so a later cancel cannot signal a
+      // recycled pid. Always exits 0 — hook output is ignored either way.
+      await jobs.reconcileStale().catch(() => {});
+      return 0;
+    }
     default:
       process.stderr.write(`Unknown command: ${cmd}\n\n${HELP}`);
       return 2;
@@ -287,6 +301,10 @@ async function main() {
 }
 
 main().then(code => process.exit(code ?? 0)).catch(err => {
+  if (err instanceof FlagError) {
+    console.error(`✗ ${err.message}`);
+    process.exit(2);
+  }
   console.error(`✗ fatal: ${err.stack || err.message}`);
   process.exit(1);
 });

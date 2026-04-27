@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/zai-companion.mjs\" __reconcile >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ]
+  }
+}
