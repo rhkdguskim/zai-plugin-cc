@@ -24,7 +24,7 @@ Forwarding rules:
 - Pick `<kind>` from: `code`, `review`, `consult`, `ask`. Default to `code` for write-style requests, `consult` for design/strategy questions, `ask` for short factual questions, and `review` only when the user asks for a review of existing diff/code.
 - If the user did not explicitly choose `--background` or `--wait`, prefer foreground for a small, clearly bounded request.
 - If the request looks open-ended, multi-file, or likely to take a while, prefer background.
-- Pass `--model <m>` only when the user explicitly names a model (`glm-4.6`, `glm-4.5-air`, `glm-4.5-flash`, etc.).
+- Pass `--model <m>` only when the user explicitly names a model (`glm-5.1`, `glm-5-turbo`, `glm-5`, `glm-4.7`, `glm-4.6`, `glm-4.5-air`). Otherwise leave it unset so the per-mode default (5.1 for code/review/consult, 4.5-air for ask) wins.
 - Treat `--background`, `--wait`, `--model`, `--base` as routing flags. Strip them from the natural-language task text before forwarding the body.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - You may use the `zai-prompting` skill only to tighten the user's request into a better Z.AI prompt before forwarding.

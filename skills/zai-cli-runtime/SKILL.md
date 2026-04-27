@@ -23,7 +23,7 @@ Use this skill only inside the `zai:zai-consultant` subagent.
 - Use exactly one helper invocation per delegation. If the user really needs two passes, return after the first and let the user re-invoke.
 - You may use the `zai-prompting` skill to rewrite the user's request into a tighter prompt **before** the single helper call.
 - That prompt drafting is the only Claude-side work allowed. Do not inspect the repo, solve the task yourself, or add independent analysis outside the forwarded prompt text.
-- Leave `--model` unset by default. Add it only when the user explicitly asks for `glm-4.6`, `glm-4.5-air`, `glm-4.5-flash`, etc.
+- Leave `--model` unset by default — the per-mode map already routes `code/review/consult` to `glm-5.1` and `ask` to `glm-4.5-air`. Add `--model <id>` only when the user explicitly names one of `glm-5.1`, `glm-5-turbo`, `glm-5` (Pro/Max), `glm-4.7`, `glm-4.6`, `glm-4.5-air`.
 
 ## Command selection
 

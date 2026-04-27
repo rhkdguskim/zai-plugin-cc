@@ -1,6 +1,6 @@
 # zai-plugin-cc
 
-> Claude Code 옆에 두는 **Z.AI (GLM-4.6 / GLM-4.5-Air)** 보조 두뇌 플러그인.
+> Claude Code 옆에 두는 **Z.AI (GLM-5.1 / GLM-4.5-Air)** 보조 두뇌 플러그인.
 >
 > Codex 플러그인의 위임 패턴을 차용해, GLM 에게 코드 생성·리뷰·설계 상담을 맡긴다.
 
@@ -8,10 +8,22 @@
 
 - `/zai:setup` — Z.AI API 키 한 번 등록하면 끝
 - `/zai:ask` — 짧은 질문은 빠른 `glm-4.5-air` 로 즉답
-- `/zai:code` — 큰 코드 작업 위임 (백그라운드 가능)
-- `/zai:review` — `git diff` 를 GLM 에 넘겨 제3자 코드 리뷰
-- `/zai:consult` — 설계/전략 상담
+- `/zai:code` — 큰 코드 작업을 플래그십 `glm-5.1` 에 위임 (백그라운드 가능)
+- `/zai:review` — `git diff` 를 `glm-5.1` 에 넘겨 제3자 코드 리뷰
+- `/zai:consult` — `glm-5.1` 으로 설계/전략 상담
 - `/zai:status` · `/zai:result` · `/zai:cancel` — 백그라운드 job 관리
+
+### 모델 매핑 (Z.AI Coding Plan 기준)
+
+| 슬래시 명령 | 기본 모델 | 이유 |
+|---|---|---|
+| `/zai:ask` | `glm-4.5-air` | 단발 Q&A — throughput 우선, 비용도 저렴 |
+| `/zai:code` | `glm-5.1` | 코딩 플래그십, multi-file/리팩토링/long-horizon agent 강함 |
+| `/zai:review` | `glm-5.1` | 리뷰 = reasoning 비중이 큼 |
+| `/zai:consult` | `glm-5.1` | 긴 추론·트레이드오프 분석 |
+
+- 한 번만 다른 모델로 돌리려면: `/zai:code --model glm-4.7 ...` (또는 `glm-5-turbo`, `glm-5` (Pro/Max))
+- 영구적으로 바꾸려면: `~/.config/zai-plugin-cc/config.json` 의 `models.<mode>` 수정 또는 `ZAI_DEFAULT_MODEL` / `ZAI_LIGHT_MODEL` 환경변수.
 
 GLM 호출은 모두 `scripts/zai-companion.mjs` 한 군데를 거치므로, 메인 Claude 세션은 외부 호출에서 격리된다. 인증 실패나 모델 오류가 메인 작업을 끊지 않는다.
 
@@ -97,8 +109,8 @@ zai-plugin-cc/
 | 변수 | 기본값 | 용도 |
 |------|--------|------|
 | `ZAI_API_KEY` | — | API 키 (저장된 config 보다 우선) |
-| `ZAI_BASE_URL` | `https://api.z.ai/api/paas/v4` | OpenAI 호환 엔드포인트 |
-| `ZAI_DEFAULT_MODEL` | `glm-4.6` | code/review/consult 기본 모델 |
+| `ZAI_BASE_URL` | `https://api.z.ai/api/anthropic` | GLM Coding 플랜이 적용되는 Anthropic 호환 엔드포인트 |
+| `ZAI_DEFAULT_MODEL` | `glm-5.1` | code/review/consult 기본 모델 |
 | `ZAI_LIGHT_MODEL` | `glm-4.5-air` | ask 기본 모델 |
 | `ZAI_DEBUG` | — | `1` 이면 stderr 에 HTTP 요청 추적 |
 | `ZAI_CONFIG_DIR` | `~/.config/zai-plugin-cc` | 설정 파일 위치 |

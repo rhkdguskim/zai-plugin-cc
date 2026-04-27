@@ -10,7 +10,7 @@ Use this skill only inside the `zai:zai-consultant` subagent — and only to **r
 
 ## Why GLM-specific prompting matters
 
-GLM-4.6 and GLM-4.5-Air respond best to **short, structured, imperative** prompts. Unlike Claude, they tend to:
+GLM-5.1 (heavy default) and GLM-4.5-Air (ask) respond best to **short, structured, imperative** prompts. Unlike Claude, they tend to:
 
 - Over-explain when the prompt is vague — pin the format down explicitly.
 - Drop into Chinese mid-response if the prompt mixes languages — keep one language.
@@ -19,7 +19,7 @@ GLM-4.6 and GLM-4.5-Air respond best to **short, structured, imperative** prompt
 
 ## Rewrite recipes by mode
 
-### `code` (GLM-4.6)
+### `code` (GLM-5.1)
 
 Original user request → rewritten prompt body:
 
@@ -37,11 +37,11 @@ Anchors:
 - "No preamble" cuts GLM's habit of restating the task.
 - If the user pasted only a function name, do **not** invent the body — refuse with a 1-line clarifying question.
 
-### `review` (GLM-4.6)
+### `review` (GLM-5.1)
 
 The companion script already collects the diff and wraps the user's free-text into a `Review the following git diff…` prompt with the section structure (Bugs, Security, Style/Maintainability, Tests). Your job here is only to add the user's **focus** text if they provided one — e.g., "extra focus: race conditions in db.go". Don't expand or rephrase the standard scaffold.
 
-### `consult` (GLM-4.6)
+### `consult` (GLM-5.1)
 
 ```
 Original: "큐 넣을지 SSE로 끝낼지"
