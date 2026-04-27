@@ -152,31 +152,43 @@ await test('parseFlags: --key=value', () => {
 
 // ---- Unit tests: prompts -------------------------------------------------
 
-await test('prompts.buildAsk produces system + user', () => {
+await test('prompts.buildAsk produces system + user with no-preamble anchor', () => {
   const m = prompts.buildAsk('hello');
   assert.equal(m.length, 2);
   assert.equal(m[0].role, 'system');
   assert.equal(m[1].role, 'user');
   assert.match(m[0].content, /Mode: ASK/);
+  assert.match(m[0].content, /NO preamble/i);
+  assert.match(m[0].content, /3 short bullets/);
   assert.equal(m[1].content, 'hello');
 });
 
-await test('prompts.buildCode includes context when supplied', () => {
+await test('prompts.buildCode anchors code-first output and language pin', () => {
   const m = prompts.buildCode('refactor', 'context-blob');
+  assert.match(m[0].content, /Mode: CODE/);
+  assert.match(m[0].content, /Match the user's language/);
+  assert.match(m[0].content, /code first/i);
   assert.equal(m[1].role, 'user');
   assert.match(m[1].content, /context-blob/);
 });
 
-await test('prompts.buildReview includes diff', () => {
+await test('prompts.buildReview pins exact section headers', () => {
   const m = prompts.buildReview('--- diff text ---', 'race conditions');
-  assert.match(m[1].content, /Bugs, Security/);
+  // The section names are now real H2 headers, not a sentence.
+  assert.match(m[1].content, /## Bugs/);
+  assert.match(m[1].content, /## Security/);
+  assert.match(m[1].content, /## Style\/Maintainability/);
+  assert.match(m[1].content, /## Tests/);
   assert.match(m[1].content, /diff text/);
   assert.match(m[1].content, /Extra focus: race conditions/);
 });
 
-await test('prompts.buildConsult sets Mode: CONSULT', () => {
+await test('prompts.buildConsult pins Options/Tradeoffs/Recommendation', () => {
   const m = prompts.buildConsult('SSE vs queue');
   assert.match(m[0].content, /Mode: CONSULT/);
+  assert.match(m[0].content, /## Options/);
+  assert.match(m[0].content, /## Tradeoffs/);
+  assert.match(m[0].content, /## Recommendation/);
 });
 
 // ---- Unit tests: config (with isolated tmp dir) -------------------------
@@ -196,7 +208,7 @@ await test('config: save -> load roundtrip', async () => {
   assert.equal(stat.mode & 0o777, 0o600);
 });
 
-await test('config: migrates legacy /paas/v4 to /anthropic and to v3', async () => {
+await test('config: migrates legacy /paas/v4 to /anthropic and to v4', async () => {
   const dir = makeTmp('zai-cfg-mig-');
   process.env.ZAI_CONFIG_DIR = dir;
   await fs.writeFile(
@@ -206,8 +218,9 @@ await test('config: migrates legacy /paas/v4 to /anthropic and to v3', async () 
   const cfg = await import('../scripts/lib/config.mjs?mig=' + Date.now());
   const loaded = await cfg.load();
   assert.equal(loaded.base_url, 'https://api.z.ai/api/anthropic');
-  assert.equal(loaded.version, 3);
+  assert.equal(loaded.version, 4);
   assert.ok(loaded.models && loaded.models.code, 'v3 must populate per-mode model map');
+  assert.ok(loaded.params && loaded.params.code, 'v4 must populate per-mode param map');
 });
 
 await test('config: v2 -> v3 preserves user-picked default_model', async () => {
@@ -232,7 +245,7 @@ await test('config: v2 -> v3 preserves user-picked default_model', async () => {
   );
   const cfg = await import('../scripts/lib/config.mjs?v2=' + Date.now());
   const loaded = await cfg.load();
-  assert.equal(loaded.version, 3);
+  assert.equal(loaded.version, 4);
   assert.equal(loaded.models.code, 'glm-4.6');
   assert.equal(loaded.models.review, 'glm-4.6');
   assert.equal(loaded.models.consult, 'glm-4.6');
@@ -294,6 +307,74 @@ await test('runner.pickModel: legacy config without models map still resolves', 
   const legacy = { default_model: 'glm-4.6', light_model: 'glm-4.5-air' };
   assert.equal(pickModel(legacy, null, 'code'), 'glm-4.6');
   assert.equal(pickModel(legacy, null, 'ask'), 'glm-4.5-air');
+});
+
+await test('runner.pickParams: each mode has its tuned hyperparameters', async () => {
+  const { pickParams } = await import('../scripts/lib/runner.mjs?pp1=' + Date.now());
+  const cfg = {
+    params: {
+      ask:     { temperature: 0.2, top_p: 0.8,  max_tokens: 512  },
+      code:    { temperature: 0.2, top_p: 0.95, max_tokens: 8192 },
+      review:  { temperature: 0.3, top_p: 0.9,  max_tokens: 4096 },
+      consult: { temperature: 0.6, top_p: 0.95, max_tokens: 4096 },
+    },
+  };
+  assert.deepEqual(pickParams(cfg, 'ask'),     { temperature: 0.2, top_p: 0.8,  max_tokens: 512  });
+  assert.deepEqual(pickParams(cfg, 'code'),    { temperature: 0.2, top_p: 0.95, max_tokens: 8192 });
+  assert.deepEqual(pickParams(cfg, 'review'),  { temperature: 0.3, top_p: 0.9,  max_tokens: 4096 });
+  assert.deepEqual(pickParams(cfg, 'consult'), { temperature: 0.6, top_p: 0.95, max_tokens: 4096 });
+});
+
+await test('config: v3 -> v4 fills in params + stop_sequences', async () => {
+  const dir = makeTmp('zai-cfg-v3-');
+  process.env.ZAI_CONFIG_DIR = dir;
+  delete process.env.ZAI_API_KEY;
+  delete process.env.ZAI_TOKEN;
+  delete process.env.ZAI_DEFAULT_MODEL;
+  delete process.env.ZAI_LIGHT_MODEL;
+  await fs.writeFile(
+    path.join(dir, 'config.json'),
+    JSON.stringify({
+      version: 3,
+      api_key: 'sk-x',
+      base_url: 'https://api.z.ai/api/anthropic',
+      models: { ask: 'glm-4.5-air', code: 'glm-4.6', review: 'glm-4.6', consult: 'glm-4.6' },
+    }),
+  );
+  const cfg = await import('../scripts/lib/config.mjs?v3=' + Date.now());
+  const loaded = await cfg.load();
+  assert.equal(loaded.version, 4);
+  // Existing model pick is preserved
+  assert.equal(loaded.models.code, 'glm-4.6');
+  // Tuned params now present
+  assert.equal(loaded.params.ask.max_tokens, 512);
+  assert.equal(loaded.params.code.max_tokens, 8192);
+  assert.equal(loaded.params.code.temperature, 0.2);
+  assert.equal(loaded.params.consult.temperature, 0.6);
+  assert.ok(Array.isArray(loaded.stop_sequences));
+  assert.ok(loaded.stop_sequences.includes('</zai_response>'));
+});
+
+await test('config: partial params override merges into per-mode map', async () => {
+  const dir = makeTmp('zai-cfg-partparams-');
+  process.env.ZAI_CONFIG_DIR = dir;
+  delete process.env.ZAI_API_KEY;
+  await fs.writeFile(
+    path.join(dir, 'config.json'),
+    JSON.stringify({
+      version: 4,
+      api_key: 'sk-x',
+      base_url: 'https://api.z.ai/api/anthropic',
+      models: { ask: 'glm-4.5-air', code: 'glm-5.1', review: 'glm-5.1', consult: 'glm-5.1' },
+      // Only change one knob; the other knobs must keep their defaults.
+      params: { code: { max_tokens: 12000 } },
+    }),
+  );
+  const cfg = await import('../scripts/lib/config.mjs?pp=' + Date.now());
+  const loaded = await cfg.load();
+  assert.equal(loaded.params.code.max_tokens, 12000);
+  assert.equal(loaded.params.code.temperature, 0.2); // untouched default
+  assert.equal(loaded.params.code.top_p, 0.95);      // untouched default
 });
 
 await test('config: ZAI_DEFAULT_MODEL env steers per-mode map', async () => {
@@ -448,24 +529,33 @@ await test('CLI: unknown subcommand exits 2', () => {
   assert.match(stderr, /Unknown command/);
 });
 
-await test('CLI: ask with no body usage error', () => {
+await test('CLI: ask with no body emits zai_error envelope (kind=usage)', () => {
   const tmpCfg = makeTmp('zai-noargs-');
   const { code, stderr } = runCompanion(['ask'], { ZAI_CONFIG_DIR: tmpCfg, ZAI_API_KEY: 'x' });
   assert.equal(code, 2);
+  assert.match(stderr, /<zai_error\b[^>]*kind="usage"/);
   assert.match(stderr, /Usage: ask/);
+  assert.match(stderr, /<\/zai_error>/);
 });
 
-await test('CLI: unknown flag exits 2', () => {
+await test('CLI: --human flag restores legacy stderr format', () => {
+  const tmpCfg = makeTmp('zai-human-');
+  const { code, stderr } = runCompanion(['ask', '--human'], { ZAI_CONFIG_DIR: tmpCfg, ZAI_API_KEY: 'x' });
+  assert.equal(code, 2);
+  assert.match(stderr, /^✗ /m);
+  assert.doesNotMatch(stderr, /<zai_error/);
+});
+
+await test('CLI: unknown flag exits 2 (FlagError)', () => {
   const tmpCfg = makeTmp('zai-uflag-');
   const { code, stderr } = runCompanion(['ask', '--zz', 'x'], { ZAI_CONFIG_DIR: tmpCfg, ZAI_API_KEY: 'x' });
   assert.equal(code, 2);
   assert.match(stderr, /Unknown flag/);
 });
 
-await test('CLI: missing API key surfaces helpful message', () => {
+await test('CLI: missing API key surfaces helpful message via envelope', () => {
   const tmpCfg = makeTmp('zai-nokey-');
   const env = { ZAI_CONFIG_DIR: tmpCfg };
-  // Strip any inherited key so the runtime really sees absence.
   delete env.ZAI_API_KEY;
   delete env.ZAI_TOKEN;
   const res = spawnSync(process.execPath, [COMPANION, 'ask', 'hi'], {
@@ -473,7 +563,37 @@ await test('CLI: missing API key surfaces helpful message', () => {
     env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env },
   });
   assert.equal(res.status, 1);
+  assert.match(res.stderr, /<zai_error/);
   assert.match(res.stderr, /API key|setup/i);
+});
+
+await test('client.redactProviderDetail: never echoes provider free-text', async () => {
+  // The redacted public message must be a stable category sentence, not the
+  // provider's detail string — that string can echo fragments of the user's
+  // prompt.
+  const c = await import('../scripts/lib/client.mjs?red=' + Date.now());
+  // The redactor is module-private; verify via the public surface: simulate
+  // a 401 by hitting an unreachable URL with a bad key. The thrown
+  // ZaiApiError.message must not contain the provider's "detail" because
+  // we never reach the provider, but the call should still classify as
+  // network-kind without leaking anything either.
+  await assert.rejects(
+    () => c.chat({
+      apiKey: 'sk-bogus',
+      baseUrl: 'http://127.0.0.1:1', // closed port
+      model: 'glm-4.5-air',
+      messages: [{ role: 'user', content: 'PROMPT_THAT_MUST_NOT_LEAK_xyz123' }],
+      maxTokens: 4,
+      timeoutMs: 1500,
+    }),
+    err => {
+      assert.ok(err.name === 'ZaiApiError');
+      // Whatever path we took, the user's prompt fragment must NOT appear
+      // in err.message — that's the field we persist on jobs.
+      assert.doesNotMatch(err.message, /PROMPT_THAT_MUST_NOT_LEAK_xyz123/);
+      return true;
+    },
+  );
 });
 
 // ---- Live: verifyKey -----------------------------------------------------

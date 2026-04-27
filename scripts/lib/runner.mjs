@@ -25,12 +25,28 @@ export function pickModel(cfg, requested, kind) {
   return cfg?.default_model;
 }
 
+// Per-mode sampling hyperparameters. Each mode is tuned for a different
+// shape of output (deterministic code vs exploratory consult) — see
+// config.mjs::DEFAULT_PARAMS for the rationale. The returned object is
+// always fully populated (temperature, top_p, max_tokens) so callers
+// don't need to handle missing keys.
+//
+// Exported for unit tests.
+export function pickParams(cfg, kind) {
+  const fromMap = cfg && cfg.params && cfg.params[kind];
+  if (fromMap) return { ...fromMap };
+  // Conservative fallback when the config predates v4 and somehow slipped
+  // past the migration: mirror the heavy-mode defaults.
+  return { temperature: 0.3, top_p: 0.9, max_tokens: 4096 };
+}
+
 export async function runForeground({ kind, messages, requestSummary, model }) {
   const cfg = await loadConfig();
   if (!cfg?.api_key) {
     throw new Error('Z.AI API key not configured. Run /zai:setup.');
   }
   const useModel = pickModel(cfg, model, kind);
+  const params = pickParams(cfg, kind);
   const job0 = await jobs.create({ kind, request: requestSummary, model: useModel, bg: false });
   // Deliberately do NOT store process.pid for foreground jobs. The companion
   // script exits as soon as the foreground call finishes; storing its pid
@@ -38,6 +54,7 @@ export async function runForeground({ kind, messages, requestSummary, model }) {
   // process the OS later assigns to that recycled pid.
   const job1 = await jobs.update(job0.id, {
     started_at: new Date().toISOString(),
+    params,
   });
   try {
     const out = await client.chat({
@@ -45,6 +62,10 @@ export async function runForeground({ kind, messages, requestSummary, model }) {
       baseUrl: cfg.base_url,
       model: useModel,
       messages,
+      temperature: params.temperature,
+      topP: params.top_p,
+      maxTokens: params.max_tokens,
+      stopSequences: cfg.stop_sequences,
       timeoutMs: cfg.timeout_ms,
     });
     // finishIfRunning rather than update so a concurrent cancel that already
@@ -73,11 +94,17 @@ export async function runBackground({ kind, messages, requestSummary, model }) {
     throw new Error('Z.AI API key not configured. Run /zai:setup.');
   }
   const useModel = pickModel(cfg, model, kind);
+  const params = pickParams(cfg, kind);
   const job = await jobs.create({ kind, request: requestSummary, model: useModel, bg: true });
   // Persist messages alongside job for the worker to pick up. This must be
   // done BEFORE spawning so the worker doesn't race past us and read an
-  // incomplete record.
-  await jobs.update(job.id, { request: { ...requestSummary, messages } });
+  // incomplete record. params + stop_sequences are stamped here so the
+  // worker uses the exact same hyperparams the foreground path would have.
+  await jobs.update(job.id, {
+    request: { ...requestSummary, messages },
+    params,
+    stop_sequences: cfg.stop_sequences,
+  });
   const child = spawn(process.execPath, [COMPANION, '__worker', job.id], {
     detached: true,
     stdio: 'ignore',
@@ -99,12 +126,22 @@ export async function runWorker(jobId) {
   const cfg = await loadConfig();
   const job = await jobs.get(jobId);
   if (!job) throw new Error(`worker: job ${jobId} not found`);
+  // Prefer the params stamped on the job at spawn time over re-resolving
+  // from the current config, in case the user's config changed between
+  // dispatch and worker pickup.
+  const params = job.params || pickParams(cfg, job.kind);
+  const stopSequences = Array.isArray(job.stop_sequences)
+    ? job.stop_sequences : cfg.stop_sequences;
   try {
     const out = await client.chat({
       apiKey: cfg.api_key,
       baseUrl: cfg.base_url,
       model: job.model,
       messages: job.request?.messages || [],
+      temperature: params.temperature,
+      topP: params.top_p,
+      maxTokens: params.max_tokens,
+      stopSequences,
       timeoutMs: cfg.timeout_ms,
     });
     // finishIfRunning is the convergence point with cancel(): if the user

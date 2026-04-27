@@ -1,143 +1,182 @@
 # zai-plugin-cc
 
-> Claude Code 옆에 두는 **Z.AI (GLM-5.1 / GLM-4.5-Air)** 보조 두뇌 플러그인.
->
-> Codex 플러그인의 위임 패턴을 차용해, GLM 에게 코드 생성·리뷰·설계 상담을 맡긴다.
+> A Claude Code plugin that pipes **Z.AI's GLM-5.1 / GLM-4.5-Air** models into your Claude Code session as a sidecar brain — code generation, code review, and design consultation.
 
-## 무엇을 하는가
+[![test](https://github.com/rhkdguskim/zai-plugin-cc/actions/workflows/test.yml/badge.svg)](https://github.com/rhkdguskim/zai-plugin-cc/actions/workflows/test.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-- `/zai:setup` — Z.AI API 키 한 번 등록하면 끝
-- `/zai:ask` — 짧은 질문은 빠른 `glm-4.5-air` 로 즉답
-- `/zai:code` — 큰 코드 작업을 플래그십 `glm-5.1` 에 위임 (백그라운드 가능)
-- `/zai:review` — `git diff` 를 `glm-5.1` 에 넘겨 제3자 코드 리뷰
-- `/zai:consult` — `glm-5.1` 으로 설계/전략 상담
-- `/zai:status` · `/zai:result` · `/zai:cancel` — 백그라운드 job 관리
+`zai-plugin-cc` is an **enterprise-grade, zero-dependency Claude Code plugin** that lets the main Claude Code session delegate heavy work — patches, reviews, design consults — to GLM models running on Z.AI's Anthropic-compatible endpoint, without leaking out of the Coding Plan quota or polluting the main agent's context.
 
-### 모델 매핑 (Z.AI Coding Plan 기준)
+**Tags / topics:** `claude-code` · `claude-code-plugin` · `anthropic` · `glm` · `glm-5.1` · `glm-4.5-air` · `zai` · `z-ai` · `sidecar` · `code-review` · `mcp` · `claude-code-marketplace`
 
-| 슬래시 명령 | 기본 모델 | 이유 |
-|---|---|---|
-| `/zai:ask` | `glm-4.5-air` | 단발 Q&A — throughput 우선, 비용도 저렴 |
-| `/zai:code` | `glm-5.1` | 코딩 플래그십, multi-file/리팩토링/long-horizon agent 강함 |
-| `/zai:review` | `glm-5.1` | 리뷰 = reasoning 비중이 큼 |
-| `/zai:consult` | `glm-5.1` | 긴 추론·트레이드오프 분석 |
+---
 
-- 한 번만 다른 모델로 돌리려면: `/zai:code --model glm-4.7 ...` (또는 `glm-5-turbo`, `glm-5` (Pro/Max))
-- 영구적으로 바꾸려면: `~/.config/zai-plugin-cc/config.json` 의 `models.<mode>` 수정 또는 `ZAI_DEFAULT_MODEL` / `ZAI_LIGHT_MODEL` 환경변수.
+## Why this plugin
 
-GLM 호출은 모두 `scripts/zai-companion.mjs` 한 군데를 거치므로, 메인 Claude 세션은 외부 호출에서 격리된다. 인증 실패나 모델 오류가 메인 작업을 끊지 않는다.
+- **Separation of concerns.** Your main Claude session keeps short-context and stays cheap. Long, expensive model work (multi-file refactors, full diff reviews, open-ended design exploration) is routed to GLM-5.1 in a child process. Auth failures, model errors, and rate limits never break the main thread.
+- **Token-efficient by design.** Sidecar stdout is a machine-readable XML envelope (`<zai_response …>BODY</zai_response>`) — Claude reads only the body. No "GLM said:" framing, no human-only footer, no double-summarization. About 20 tokens saved per call versus a free-form footer.
+- **Per-mode model + sampling tuning.** `code` and `review` run on the deterministic side (low temperature, high `top_p`, big `max_tokens`); `consult` runs hotter to surface tradeoffs; `ask` clamps to ~120 words on the fast model. Each mode is independently overridable.
+- **Hardened cancellation.** A previous `process.kill(pid, 'SIGTERM')` path could broadcast SIGTERM to every user process when `pid <= 0` — closing the entire macOS GUI session. The runtime now refuses any pid ≤ 1, verifies the live process is genuinely our worker for the specific job id (via `ps -ww`), and converges concurrent terminal writes through a single `finishIfRunning` helper.
+- **Single-binary install.** Pure Node 18+ built-ins. No `npm install`. No lockfile. The plugin is the repo.
 
-## 설치
+## Installation
 
-### 1. 플러그인 등록
-
-로컬 경로로 등록하는 가장 빠른 방법:
+### From this repo's local marketplace
 
 ```bash
-# Claude Code 에서
-/plugin install /Users/kwanghyeonkim/Project/zai-plugin-cc
+claude plugin marketplace add rhkdguskim/zai-plugin-cc
+claude plugin install zai@zai-plugin-cc
 ```
 
-또는 직접 마켓플레이스 캐시에 심볼릭 링크:
+(Or with a local path: `claude plugin marketplace add /path/to/zai-plugin-cc`.)
 
-```bash
-ln -s /Users/kwanghyeonkim/Project/zai-plugin-cc \
-      ~/.claude/plugins/local/zai-plugin-cc
-```
-
-### 2. API 키 등록
+### Register your Z.AI API key
 
 ```text
 /zai:setup
 ```
 
-실행하면 Claude Code 가 키 입력을 요청한다. 받은 키는
+Claude Code will prompt for the key. The runtime stores it in `~/.config/zai-plugin-cc/config.json` (mode `0600`) and verifies connectivity against `glm-4.5-air` on the Anthropic-compat endpoint.
 
-- `~/.config/zai-plugin-cc/config.json` 에 mode 0600 으로 저장
-- `GET /api/paas/v4/models` 로 검증 후 사용 가능 모델 목록 표시
-
-CI 등 비대화형 환경에서는 환경변수로:
+For non-interactive environments:
 
 ```bash
 export ZAI_API_KEY=sk-zai-xxxxxxxxx
 ```
 
-키 발급: https://z.ai/model-api
+Get a key from <https://z.ai/model-api>.
 
-## 사용 예시
+## Slash commands
+
+| Command | Purpose | Default model |
+|---|---|---|
+| `/zai:setup` | Register or refresh the API key | — |
+| `/zai:ask <message>` | Single-shot Q&A (≤120 words) | `glm-4.5-air` |
+| `/zai:code [--wait\|--background] [--model <id>] <task>` | Code generation / multi-file refactor | `glm-5.1` |
+| `/zai:review [--wait\|--background] [--base <ref>] [focus]` | Third-party diff review | `glm-5.1` |
+| `/zai:consult [--wait\|--background] <topic>` | Design / strategy consult | `glm-5.1` |
+| `/zai:status [job-id]` | List or inspect background jobs | — |
+| `/zai:result <job-id>` | Print a finished job's stored output | — |
+| `/zai:cancel <job-id>` | Cancel a running background job | — |
+
+## Model mapping (Z.AI Coding Plan)
+
+| Mode | Model | Why |
+|---|---|---|
+| `ask` | `glm-4.5-air` | Single-shot Q&A; throughput first, also cheap |
+| `code` | `glm-5.1` | Flagship coding model; multi-file refactor / long-horizon agentic |
+| `review` | `glm-5.1` | Review = reasoning-heavy; section-anchored output |
+| `consult` | `glm-5.1` | Long tradeoff exploration |
+
+- One-off override: `/zai:code --model glm-4.7 …` (also `glm-5-turbo`, `glm-5` (Pro/Max), `glm-4.6`, `glm-4.5-air`).
+- Permanent override: edit `~/.config/zai-plugin-cc/config.json` under `models.<mode>`, or set `ZAI_DEFAULT_MODEL` / `ZAI_LIGHT_MODEL`.
+
+## Per-mode sampling hyperparameters
+
+Tuned defaults per mode (override under `params.<mode>` in the config file):
+
+| Mode | `temperature` | `top_p` | `max_tokens` | Rationale |
+|---|---|---|---|---|
+| `ask` | 0.2 | 0.8 | 512 | Determinism + brevity; output cap forces 3-bullet shape |
+| `code` | 0.2 | 0.95 | 8192 | Code shouldn't be creative; long patches need headroom |
+| `review` | 0.3 | 0.9 | 4096 | Mild diversity to surface varied issue classes |
+| `consult` | 0.6 | 0.95 | 4096 | Genuine tradeoff exploration |
+
+A shared `stop_sequences` list (`</zai_response>`, `</zai_error>`, `Let me know if you`, `Hope this helps`) clips boilerplate that GLM occasionally adds despite the system prompt.
+
+## Output envelope (token-efficient)
+
+The runtime emits one of these on stdout/stderr — Claude Code reads only the body:
 
 ```text
-# 빠른 단발 질문
-/zai:ask 이 정규식 ^(a+)+$ 가 왜 ReDoS 위험한지 알려줘
-
-# 큰 코드 위임 (백그라운드 추천)
-/zai:code src/auth/jwt.ts 에 만료 시간 갱신 로직 추가해줘
-
-# git diff 리뷰
-/zai:review
-
-# 설계 상담
-/zai:consult 주문 처리에 큐를 넣을지 SSE 로 끝낼지 트레이드오프 봐줘
-
-# 백그라운드 job 추적
-/zai:status
-/zai:result 01HZAB-deadbeef
-/zai:cancel 01HZAB-deadbeef
+<zai_response kind="code" model="glm-5.1" job_id="abc-123" elapsed_ms="2410" input_tokens="312" output_tokens="884">
+…answer body…
+</zai_response>
 ```
 
-## 디렉토리 구조
+```text
+<zai_dispatched kind="consult" model="glm-5.1" job_id="abc-123" mode="background"/>
+<zai_pending      kind="code"    job_id="abc-123" model="glm-5.1"/>
+<zai_cancelled    job_id="abc-123" status="cancelled"/>
+<zai_jobs count="3" shown="3"> …one JSON object per line… </zai_jobs>
+<zai_error        kind="auth" status="401" job_id="abc-123">…short categorized message (no provider echo)…</zai_error>
+```
+
+For terminal users who want the legacy human-readable footer back, every command accepts `--human`.
+
+## Performance: parallel tool calling
+
+`/zai:review` and `/zai:code` follow Anthropic's [parallel tool calling guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices#optimize-parallel-tool-calling): independent measurement calls (`git status --short`, `git diff --shortstat`, `git diff --shortstat --cached`) are dispatched in a single message. The dispatch step that follows is correctly serialized because it depends on the user's `AskUserQuestion` answer.
+
+## Security
+
+- API key is stored only in `~/.config/zai-plugin-cc/config.json` with mode `0600`.
+- Nothing about the user's repo is sent to Z.AI except what the user explicitly delegates. The single automatic attachment is the `git diff` selected by `/zai:review`.
+- Provider error free-text is **never** persisted into job records — `client.mjs` redacts to a stable category sentence (`auth` / `rate_limit` / `quota` / `protocol` / `api`) so a misbehaving upstream that echoes prompt fragments cannot leak them onto disk via `jobs.update({error})`.
+- `process.kill` is wrapped by `safeKill(pid, signal)` which throws on `pid <= 1` — broadcasting SIGTERM to every user process is impossible by construction.
+- Background workers are verified by **command-line match** (`ps -ww -p <pid>` must contain `__worker <jobId>`) before any signal is sent. PID recycling cannot redirect a `/zai:cancel` to an unrelated process.
+
+## Architecture
 
 ```text
 zai-plugin-cc/
-├── .claude-plugin/plugin.json    플러그인 매니페스트
-├── agents/zai-consultant.md      얇은 포워더 서브에이전트
-├── commands/                     슬래시 명령 8개
-├── skills/                       내부 호출 계약 + 프롬프트 가이드
+├── .claude-plugin/
+│   ├── plugin.json              plugin manifest
+│   └── marketplace.json         single-plugin local marketplace
+├── agents/zai-consultant.md     thin Bash forwarder subagent
+├── commands/                    8 slash commands
+├── skills/
+│   ├── zai-cli-runtime/         internal: helper-call contract
+│   └── zai-prompting/           internal: GLM prompt-shaping rules
+├── hooks/hooks.json             SessionEnd → __reconcile (orphan cleanup)
 ├── scripts/
-│   ├── zai-companion.mjs         진입점 (setup/ask/code/review/consult/...)
+│   ├── zai-companion.mjs        single CLI entrypoint (subcommands + envelope)
 │   └── lib/
-│       ├── config.mjs            토큰·설정
-│       ├── client.mjs            Z.AI fetch 래퍼
-│       ├── jobs.mjs              .zai/jobs 상태 관리
-│       ├── runner.mjs            foreground/background 실행기
-│       └── prompts.mjs           모드별 프롬프트 템플릿
-└── docs/                         FEATURES / MVP / ARCHITECTURE
+│       ├── config.mjs           v4 schema with models + params + stop_sequences
+│       ├── client.mjs           Z.AI Anthropic-compat fetch + redacted errors
+│       ├── jobs.mjs             O_EXCL lockfile + verify-then-signal cancel
+│       ├── runner.mjs           foreground / background / worker
+│       ├── prompts.mjs          per-mode system prompts (no preamble, fixed sections)
+│       └── flags.mjs            CLI flag parser
+├── tests/test.mjs               42 unit + 8 live (skip without ZAI_API_KEY)
+├── .github/workflows/test.yml   CI on every push / PR
+├── package.json                 zero-dep, type:module, engines.node>=18
+└── CHANGELOG.md, LICENSE
 ```
 
-## 환경 변수
+## Environment variables
 
-| 변수 | 기본값 | 용도 |
-|------|--------|------|
-| `ZAI_API_KEY` | — | API 키 (저장된 config 보다 우선) |
-| `ZAI_BASE_URL` | `https://api.z.ai/api/anthropic` | GLM Coding 플랜이 적용되는 Anthropic 호환 엔드포인트 |
-| `ZAI_DEFAULT_MODEL` | `glm-5.1` | code/review/consult 기본 모델 |
-| `ZAI_LIGHT_MODEL` | `glm-4.5-air` | ask 기본 모델 |
-| `ZAI_DEBUG` | — | `1` 이면 stderr 에 HTTP 요청 추적 |
-| `ZAI_CONFIG_DIR` | `~/.config/zai-plugin-cc` | 설정 파일 위치 |
-| `ZAI_JOBS_DIR` | `<repo>/.zai/jobs` | job 파일 위치 |
+| Variable | Default | Purpose |
+|---|---|---|
+| `ZAI_API_KEY` | — | API key (overrides stored config) |
+| `ZAI_BASE_URL` | `https://api.z.ai/api/anthropic` | Anthropic-compat endpoint covered by the GLM Coding Plan |
+| `ZAI_DEFAULT_MODEL` | `glm-5.1` | Model for `code` / `review` / `consult` |
+| `ZAI_LIGHT_MODEL` | `glm-4.5-air` | Model for `ask` |
+| `ZAI_DEBUG` | — | `1` traces HTTP requests to stderr |
+| `ZAI_CONFIG_DIR` | `~/.config/zai-plugin-cc` | Config file location |
+| `ZAI_JOBS_DIR` | `<repo>/.zai/jobs` | Background job state |
 
-## 문서
+## Running tests
 
-- [`docs/FEATURES.md`](docs/FEATURES.md) — 기능 분석
-- [`docs/MVP.md`](docs/MVP.md) — MVP 범위와 명령어 사양
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 아키텍처 / 데이터 흐름
+```bash
+node tests/test.mjs              # unit tests (fast, offline)
+ZAI_API_KEY=… node tests/test.mjs # also runs live integration tests
+```
 
-## 보안
+CI runs the unit tests on every push/PR via `.github/workflows/test.yml`. Live tests are skipped without a key.
 
-- API 키는 `~/.config/zai-plugin-cc/config.json` (0600) 에만 저장. 저장소 안에 떨어지지 않도록 `.gitignore` 에 `.zai/`, `.env`, `zai-config.json` 등록됨.
-- 사용자 코드는 명시적으로 위임된 부분만 Z.AI 로 전송 — `/zai:review` 가 `git diff` 일부를 보내는 것이 유일한 자동 첨부.
-- job 결과는 `.zai/jobs/` 에 14 일 보관 후 GC. 즉시 지우려면 디렉토리 통째로 삭제.
+## Roadmap
 
-## 미완·확장 슬롯
+| Slot | Notes |
+|---|---|
+| Streaming (SSE) | currently emits full payload at the end |
+| Stop-hook auto-review gate | SessionEnd cleans up orphans; auto-review is not wired |
+| `--resume-last` (multi-turn) | every call is single-shot today |
+| Multi-profile (personal vs corporate keys) | single key today |
+| Tool use / function-calling delegation | not in scope for MVP |
+| Retry / backoff on 429/503 | classification only today |
+| Cost estimation per call | usage tokens captured; pricing model not wired |
 
-| 슬롯 | 비고 |
-|------|------|
-| 스트리밍(SSE) 인 라이브 표시 | 현재는 완료 후 일괄 출력 |
-| Stop 훅 자동 리뷰 게이트 | `hooks/hooks.json` 비어 있음 |
-| `--resume-last` 멀티턴 | 현재 모든 호출은 단발 |
-| 멀티 프로필 (개인/회사 토큰) | 단일 키만 |
-| Tool use / function calling 위임 | MVP 비대상 |
+## License
 
-## 라이선스
-
-MIT (예정)
+MIT — see [LICENSE](LICENSE).

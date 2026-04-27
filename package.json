@@ -1,0 +1,44 @@
+{
+  "name": "zai-plugin-cc",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Sidecar plugin that pipes Z.AI's GLM-5.1 / GLM-4.5-Air models into Claude Code for token-efficient code generation, code review, and design consultation.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node tests/test.mjs",
+    "test:live": "ZAI_API_KEY=$ZAI_API_KEY node tests/test.mjs",
+    "validate-plugin": "claude plugin validate ."
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rhkdguskim/zai-plugin-cc.git"
+  },
+  "homepage": "https://github.com/rhkdguskim/zai-plugin-cc",
+  "bugs": {
+    "url": "https://github.com/rhkdguskim/zai-plugin-cc/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "claude-code-marketplace",
+    "anthropic",
+    "anthropic-compatible",
+    "zai",
+    "z-ai",
+    "glm",
+    "glm-5.1",
+    "glm-4.7",
+    "glm-4.6",
+    "glm-4.5-air",
+    "sidecar",
+    "sidekick",
+    "code-review",
+    "code-generation",
+    "ai-pair-programming",
+    "developer-tools"
+  ]
+}

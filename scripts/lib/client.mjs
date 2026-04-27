@@ -60,7 +60,9 @@ export async function chat({
   messages,
   system,
   temperature,
+  topP,
   maxTokens,
+  stopSequences,
   signal,
   timeoutMs,
 }) {
@@ -82,9 +84,13 @@ export async function chat({
     messages: finalMessages,
     ...(finalSystem ? { system: finalSystem } : {}),
     ...(temperature != null ? { temperature } : {}),
+    ...(topP != null ? { top_p: topP } : {}),
+    ...(Array.isArray(stopSequences) && stopSequences.length
+      ? { stop_sequences: stopSequences } : {}),
   };
 
-  debug('POST', url, 'model=', model, 'msgs=', finalMessages.length, 'sys=', !!finalSystem);
+  debug('POST', url, 'model=', model, 'msgs=', finalMessages.length, 'sys=', !!finalSystem,
+    'temp=', temperature ?? 'default', 'top_p=', topP ?? 'default', 'max=', maxTokens ?? 4096);
 
   let res;
   try {
@@ -126,7 +132,15 @@ export async function chat({
     if (res.status === 401 || res.status === 403) kind = 'auth';
     else if (res.status === 429) kind = 'rate_limit';
     else if (code === '1113') kind = 'quota';
-    throw new ZaiApiError(`Z.AI error: ${detail}`, { status: res.status, body: json, kind });
+    // Provider error messages can echo fragments of the request body (the
+    // user's prompt). The redacted public-facing message stays inside
+    // generic categories so we never persist that echoed prompt into job
+    // records via err.message. The full provider body is still attached
+    // to err.body for ZAI_DEBUG inspection but never written to disk.
+    const publicMessage = redactProviderDetail({ kind, status: res.status, code, detail });
+    const err = new ZaiApiError(publicMessage, { status: res.status, body: json, kind });
+    err.code = code ?? null;
+    throw err;
   }
 
   const out = {
@@ -140,6 +154,23 @@ export async function chat({
     debug('empty content. stop_reason=', json?.stop_reason, 'content=', JSON.stringify(json?.content));
   }
   return out;
+}
+
+// Build a generic error message from category + HTTP status + optional code.
+// Never includes the provider's free-text `detail` — that field can echo
+// fragments of the request body, and `err.message` ends up persisted into
+// job records as `error`. Categories cover everything an automated caller
+// (Claude reading /zai:result) needs to route on; the raw detail is still
+// available on `err.body` for ZAI_DEBUG humans.
+function redactProviderDetail({ kind, status, code }) {
+  const codeSuffix = code ? ` (code ${code})` : '';
+  switch (kind) {
+    case 'auth':       return `Z.AI auth rejected (HTTP ${status}). Run /zai:setup to refresh the key.${codeSuffix}`;
+    case 'rate_limit': return `Z.AI rate-limited (HTTP ${status}). Retry after a short backoff.${codeSuffix}`;
+    case 'quota':      return `Z.AI quota exhausted on this surface (HTTP ${status})${codeSuffix}.`;
+    case 'protocol':   return `Z.AI returned a non-JSON response (HTTP ${status}).`;
+    default:           return `Z.AI error (HTTP ${status})${codeSuffix}.`;
+  }
 }
 
 function normalizeUsage(u) {

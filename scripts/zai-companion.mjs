@@ -46,6 +46,58 @@ function fmtElapsed(start, end) {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+function elapsedMs(start, end) {
+  if (!start) return 0;
+  const s = new Date(start).getTime();
+  const e = end ? new Date(end).getTime() : Date.now();
+  return Math.max(0, e - s);
+}
+
+function xmlAttr(value) {
+  // Defensive escape for the model id, job id, and small number-like attrs.
+  // None of these should ever contain XML metacharacters but the cost of
+  // escaping is trivial and prevents downstream parsing surprises.
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+// Standard machine-readable response envelope. Claude Code reads this raw
+// and pulls out only the body — no human chrome (model footer, separator
+// dashes) lands in its context. Set --human to restore the legacy footer
+// for terminal users.
+function emitResponse({ body, model, jobId, kind, elapsedMs: ms, usage, human }) {
+  if (human) {
+    process.stdout.write((body ?? '') + '\n');
+    process.stdout.write(`\n— glm/${model} · ${ms < 1000 ? ms + 'ms' : (ms/1000).toFixed(1) + 's'} · job ${jobId}\n`);
+    return;
+  }
+  const usageAttr = usage && usage.input_tokens != null && usage.output_tokens != null
+    ? ` input_tokens="${xmlAttr(usage.input_tokens)}" output_tokens="${xmlAttr(usage.output_tokens)}"` : '';
+  process.stdout.write(
+    `<zai_response kind="${xmlAttr(kind)}" model="${xmlAttr(model)}" job_id="${xmlAttr(jobId)}" elapsed_ms="${xmlAttr(ms)}"${usageAttr}>\n` +
+    (body ?? '') +
+    `\n</zai_response>\n`
+  );
+}
+
+function emitError({ kind, status, message, jobId, human }) {
+  if (human) {
+    process.stderr.write(`✗ ${message}\n`);
+    if (jobId) process.stderr.write(`  job ${jobId}\n`);
+    return;
+  }
+  const idAttr = jobId ? ` job_id="${xmlAttr(jobId)}"` : '';
+  const statusAttr = status != null ? ` status="${xmlAttr(status)}"` : '';
+  process.stderr.write(
+    `<zai_error kind="${xmlAttr(kind)}"${statusAttr}${idAttr}>\n` +
+    (message ?? '') +
+    `\n</zai_error>\n`
+  );
+}
+
 async function cmdSetup(argv) {
   const { flags } = parseFlags(argv);
   if (flags.reset) {
@@ -115,7 +167,7 @@ async function cmdAsk(argv) {
   const { flags, positional } = parseFlags(argv);
   const question = positional.join(' ').trim();
   if (!question) {
-    console.error('Usage: ask <message>');
+    emitError({ kind: 'usage', message: 'Usage: ask <message>', human: flags.human });
     return 2;
   }
   try {
@@ -125,11 +177,24 @@ async function cmdAsk(argv) {
       requestSummary: { question },
       model: flags.model,
     });
-    process.stdout.write(out.text + '\n');
-    process.stdout.write(`\n— glm/${out.model} · ${fmtElapsed(job.started_at)} · job ${job.id}\n`);
+    emitResponse({
+      body: out.text,
+      model: out.model,
+      jobId: job.id,
+      kind: 'ask',
+      elapsedMs: elapsedMs(job.started_at, job.ended_at),
+      usage: out.usage,
+      human: flags.human,
+    });
     return 0;
   } catch (err) {
-    console.error(`✗ ${err.message}`);
+    emitError({
+      kind: err.kind || 'runtime',
+      status: err.status,
+      message: err.message,
+      jobId: err.jobId,
+      human: flags.human,
+    });
     return 1;
   }
 }
@@ -152,16 +217,16 @@ async function dispatchTask(kind, argv, builder) {
         if (cached) diff += `\n\n--- staged ---\n${cached}`;
       }
       if (!diff.trim()) {
-        console.error('No git diff to review.');
+        emitError({ kind: 'no_diff', message: 'No git diff to review.', human: flags.human });
         return 1;
       }
       extraContext = diff;
     } catch (err) {
-      console.error(`✗ Failed to collect diff: ${err.message}`);
+      emitError({ kind: 'diff_failed', message: `Failed to collect diff: ${err.message}`, human: flags.human });
       return 1;
     }
   } else if (!body) {
-    console.error(`Usage: ${kind} <input>`);
+    emitError({ kind: 'usage', message: `Usage: ${kind} <input>`, human: flags.human });
     return 2;
   }
 
@@ -176,11 +241,25 @@ async function dispatchTask(kind, argv, builder) {
         requestSummary,
         model: flags.model,
       });
-      console.log(`job-id: ${jobId} (background, ${model})`);
-      console.log('Check `/zai:status` or `/zai:result <id>`.');
+      // Background dispatch: emit a tiny envelope carrying just the job id
+      // and the model so Claude knows what to poll. No human chrome.
+      if (flags.human) {
+        process.stdout.write(`job-id: ${jobId} (background, ${model})\n`);
+        process.stdout.write('Check `/zai:status` or `/zai:result <id>`.\n');
+      } else {
+        process.stdout.write(
+          `<zai_dispatched kind="${xmlAttr(kind)}" model="${xmlAttr(model)}" job_id="${xmlAttr(jobId)}" mode="background"/>\n`
+        );
+      }
       return 0;
     } catch (err) {
-      console.error(`✗ ${err.message}`);
+      emitError({
+        kind: err.kind || 'runtime',
+        status: err.status,
+        message: err.message,
+        jobId: err.jobId,
+        human: flags.human,
+      });
       return 1;
     }
   }
@@ -192,66 +271,125 @@ async function dispatchTask(kind, argv, builder) {
       requestSummary,
       model: flags.model,
     });
-    process.stdout.write(out.text + '\n');
-    process.stdout.write(`\n— glm/${out.model} · ${fmtElapsed(job.started_at)} · job ${job.id}\n`);
+    emitResponse({
+      body: out.text,
+      model: out.model,
+      jobId: job.id,
+      kind,
+      elapsedMs: elapsedMs(job.started_at, job.ended_at),
+      usage: out.usage,
+      human: flags.human,
+    });
     return 0;
   } catch (err) {
-    console.error(`✗ ${err.message}`);
+    emitError({
+      kind: err.kind || 'runtime',
+      status: err.status,
+      message: err.message,
+      jobId: err.jobId,
+      human: flags.human,
+    });
     return 1;
   }
 }
 
 async function cmdStatus(argv) {
-  const { positional } = parseFlags(argv);
+  const { flags, positional } = parseFlags(argv);
   if (positional[0]) {
     const j = await jobs.get(positional[0]);
-    if (!j) { console.error(`job not found: ${positional[0]}`); return 1; }
-    console.log(JSON.stringify(j, null, 2));
+    if (!j) {
+      emitError({ kind: 'not_found', message: `job not found: ${positional[0]}`, jobId: positional[0], human: flags.human });
+      return 1;
+    }
+    // Status reads of a single job emit JSON either way — it's already
+    // machine-friendly and the data is exactly what callers need.
+    process.stdout.write(JSON.stringify(j, null, flags.human ? 2 : 0) + '\n');
     return 0;
   }
   const all = await jobs.list({});
-  if (!all.length) { console.log('(no jobs)'); return 0; }
-  const rows = all.slice(0, 20).map(j => {
-    return `${j.id}  ${j.kind.padEnd(7)} ${j.status.padEnd(9)} ${j.model.padEnd(14)} ${fmtElapsed(j.started_at, j.ended_at)}`;
-  });
-  console.log('id'.padEnd(28) + 'kind   status    model         elapsed');
-  console.log(rows.join('\n'));
+  if (!all.length) {
+    if (flags.human) process.stdout.write('(no jobs)\n');
+    else process.stdout.write('<zai_jobs count="0"/>\n');
+    return 0;
+  }
+  if (flags.human) {
+    const rows = all.slice(0, 20).map(j => (
+      `${j.id}  ${(j.kind || '').padEnd(7)} ${(j.status || '').padEnd(9)} ${(j.model || '').padEnd(14)} ${fmtElapsed(j.started_at, j.ended_at)}`
+    ));
+    process.stdout.write('id'.padEnd(28) + 'kind   status    model         elapsed\n');
+    process.stdout.write(rows.join('\n') + '\n');
+    return 0;
+  }
+  // Compact JSON envelope: each row is one line, keys ordered for stable
+  // diffs in test snapshots.
+  const compact = all.slice(0, 20).map(j => ({
+    id: j.id,
+    kind: j.kind,
+    status: j.status,
+    model: j.model,
+    started_at: j.started_at,
+    ended_at: j.ended_at,
+    bg: !!j.bg,
+  }));
+  process.stdout.write(`<zai_jobs count="${all.length}" shown="${compact.length}">\n`);
+  for (const r of compact) process.stdout.write(JSON.stringify(r) + '\n');
+  process.stdout.write('</zai_jobs>\n');
   return 0;
 }
 
 async function cmdResult(argv) {
-  const { positional } = parseFlags(argv);
+  const { flags, positional } = parseFlags(argv);
   const id = positional[0];
-  if (!id) { console.error('Usage: result <job-id>'); return 2; }
+  if (!id) { emitError({ kind: 'usage', message: 'Usage: result <job-id>', human: flags.human }); return 2; }
   const j = await jobs.get(id);
-  if (!j) { console.error(`job not found: ${id}`); return 1; }
+  if (!j) { emitError({ kind: 'not_found', message: `job not found: ${id}`, jobId: id, human: flags.human }); return 1; }
   if (j.status === 'running') {
-    console.log(`job ${id} still running (pid ${j.pid}). Try again shortly.`);
+    if (flags.human) process.stdout.write(`job ${id} still running (pid ${j.pid}). Try again shortly.\n`);
+    else process.stdout.write(`<zai_pending kind="${xmlAttr(j.kind)}" job_id="${xmlAttr(id)}" model="${xmlAttr(j.model)}"/>\n`);
     return 0;
   }
   if (j.status === 'error') {
-    console.error(`job ${id} errored: ${j.error}`);
+    emitError({
+      kind: 'job_failed',
+      message: j.error || 'job ended with error',
+      jobId: id,
+      human: flags.human,
+    });
     return 1;
   }
   if (j.status === 'cancelled') {
-    console.log(`job ${id} was cancelled.`);
+    if (flags.human) process.stdout.write(`job ${id} was cancelled.\n`);
+    else process.stdout.write(`<zai_cancelled job_id="${xmlAttr(id)}"/>\n`);
     return 0;
   }
-  process.stdout.write((j.result ?? '') + '\n');
-  process.stdout.write(`\n— glm/${j.model} · ${fmtElapsed(j.started_at, j.ended_at)} · job ${j.id}\n`);
+  emitResponse({
+    body: j.result ?? '',
+    model: j.model,
+    jobId: j.id,
+    kind: j.kind,
+    elapsedMs: elapsedMs(j.started_at, j.ended_at),
+    usage: j.usage,
+    human: flags.human,
+  });
   return 0;
 }
 
 async function cmdCancel(argv) {
-  const { positional } = parseFlags(argv);
+  const { flags, positional } = parseFlags(argv);
   const id = positional[0];
-  if (!id) { console.error('Usage: cancel <job-id>'); return 2; }
+  if (!id) { emitError({ kind: 'usage', message: 'Usage: cancel <job-id>', human: flags.human }); return 2; }
   try {
     const j = await jobs.cancel(id);
-    console.log(`✓ ${id} → ${j.status}`);
+    if (flags.human) process.stdout.write(`✓ ${id} → ${j.status}\n`);
+    else process.stdout.write(`<zai_cancelled job_id="${xmlAttr(id)}" status="${xmlAttr(j.status)}"/>\n`);
     return 0;
   } catch (err) {
-    console.error(`✗ ${err.message}`);
+    emitError({
+      kind: 'cancel_failed',
+      message: err.message,
+      jobId: id,
+      human: flags.human,
+    });
     return 1;
   }
 }

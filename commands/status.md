@@ -7,12 +7,9 @@ allowed-tools: Bash(node:*)
 
 !`node "${CLAUDE_PLUGIN_ROOT}/scripts/zai-companion.mjs" status $ARGUMENTS`
 
-If the user did not pass a job ID:
+Output handling:
 
-- Render the command output as a single Markdown table for the current and recent runs in this repo.
-- Keep it compact. Preserve job ID, kind, status, model, and elapsed.
+- If the user passed a job-id: stdout is a JSON object representing that job. Render it as a compact two-column key/value Markdown list. Preserve `id`, `kind`, `status`, `model`, `started_at`, `ended_at`, `bg`, and `usage` if present.
+- If no job-id: stdout is `<zai_jobs count="N" shown="M">` followed by one JSON object per line, then `</zai_jobs>`. Render the lines as a single Markdown table with columns: id, kind, status, model, elapsed (computed from started_at/ended_at). If `count="0"` (or `<zai_jobs count="0"/>`) say "(no jobs)".
 
-If the user did pass a job ID:
-
-- Present the full command output to the user.
-- Do not summarize or condense it.
+Do not paraphrase or invent rows. Drop nothing.

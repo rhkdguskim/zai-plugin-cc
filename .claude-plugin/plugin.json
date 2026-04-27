@@ -1,8 +1,32 @@
 {
   "name": "zai",
-  "version": "0.1.0",
-  "description": "Use Z.AI (GLM-4.6 / GLM-4.5-Air) from Claude Code as a sidekick brain — code generation, review, and design consultation.",
+  "version": "0.2.0",
+  "description": "Sidecar plugin that pipes Z.AI's GLM-5.1 / GLM-4.5-Air models into Claude Code for token-efficient code generation, code review, and design consultation. Per-mode model + sampling tuning, machine-readable XML envelope, hardened cancellation.",
   "author": {
     "name": "kwanghyeonkim"
-  }
+  },
+  "homepage": "https://github.com/rhkdguskim/zai-plugin-cc",
+  "repository": "https://github.com/rhkdguskim/zai-plugin-cc",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "claude-code-marketplace",
+    "anthropic",
+    "anthropic-compatible",
+    "zai",
+    "z-ai",
+    "glm",
+    "glm-5.1",
+    "glm-4.7",
+    "glm-4.6",
+    "glm-4.5-air",
+    "sidecar",
+    "sidekick",
+    "code-review",
+    "code-generation",
+    "ai-pair-programming",
+    "mcp",
+    "developer-tools"
+  ]
 }

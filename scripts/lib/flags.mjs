@@ -13,13 +13,14 @@
 // produce an explicit error so silent typos don't go unnoticed.
 
 const VALUE_FLAGS = new Set(['--model', '--key', '--base']);
-const BOOL_FLAGS  = new Set(['--background', '--wait', '--reset', '--json']);
+const BOOL_FLAGS  = new Set(['--background', '--wait', '--reset', '--json', '--human']);
 
 const FLAG_TO_PROP = {
   '--background': 'background',
   '--wait':       'wait',
   '--reset':      'reset',
   '--json':       'json',
+  '--human':      'human',
   '--model':      'model',
   '--key':        'key',
   '--base':       'base',

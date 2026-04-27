@@ -19,10 +19,39 @@ const DEFAULT_MODELS = {
   consult: 'glm-5.1',
 };
 
+// Per-mode sampling hyperparameters. Tuned for Claude-as-consumer:
+//   * `ask`     — single-shot factual Q&A. Determinism + brevity. Hard cap
+//                 at 512 tokens forces the model to compress to bullets.
+//   * `code`    — code generation. Determinism (creativity hurts code), but
+//                 a high max_tokens cap so long patches don't truncate.
+//   * `review`  — edge-case finding. Mild diversity (top_p 0.9) lets the
+//                 model surface varied issue classes without hallucinating.
+//   * `consult` — design exploration. Higher temperature for genuine
+//                 tradeoff exploration; capped output length.
+//
+// `stop_sequences` clip stray boilerplate that GLM still emits despite the
+// system prompt — common patterns like "Let me know if you have…" and
+// model-fabricated XML envelope close tags.
+const DEFAULT_PARAMS = {
+  ask:     { temperature: 0.2, top_p: 0.8,  max_tokens: 512  },
+  code:    { temperature: 0.2, top_p: 0.95, max_tokens: 8192 },
+  review:  { temperature: 0.3, top_p: 0.9,  max_tokens: 4096 },
+  consult: { temperature: 0.6, top_p: 0.95, max_tokens: 4096 },
+};
+
+const DEFAULT_STOP_SEQUENCES = [
+  '</zai_response>',
+  '</zai_error>',
+  'Let me know if you',
+  'Hope this helps',
+];
+
 const DEFAULTS = {
-  version: 3,
+  version: 4,
   base_url: 'https://api.z.ai/api/anthropic',
   models: { ...DEFAULT_MODELS },
+  params: { ...DEFAULT_PARAMS },
+  stop_sequences: [...DEFAULT_STOP_SEQUENCES],
   // Legacy fallbacks kept so older config files and ZAI_DEFAULT_MODEL /
   // ZAI_LIGHT_MODEL env vars still steer the per-mode map when explicitly
   // set. New installs read straight from `models`.
@@ -84,7 +113,24 @@ function migrate(cfg) {
     // by a user can't break callers that expect every kind to resolve.
     next.models = { ...DEFAULT_MODELS, ...next.models };
   }
-  if (!next.version || next.version < 3) next.version = 3;
+  // v3 -> v4: introduce `params` per-mode hyperparameter map and a shared
+  // `stop_sequences` list. Existing v3 configs that lack these fields get
+  // the tuned defaults; partial maps a user wrote get filled in to avoid
+  // breaking callers that expect every mode to resolve.
+  if (!next.params || typeof next.params !== 'object') {
+    next.params = { ...DEFAULT_PARAMS };
+  } else {
+    next.params = {
+      ask:     { ...DEFAULT_PARAMS.ask,     ...(next.params.ask     || {}) },
+      code:    { ...DEFAULT_PARAMS.code,    ...(next.params.code    || {}) },
+      review:  { ...DEFAULT_PARAMS.review,  ...(next.params.review  || {}) },
+      consult: { ...DEFAULT_PARAMS.consult, ...(next.params.consult || {}) },
+    };
+  }
+  if (!Array.isArray(next.stop_sequences)) {
+    next.stop_sequences = [...DEFAULT_STOP_SEQUENCES];
+  }
+  if (!next.version || next.version < 4) next.version = 4;
   return next;
 }
 
@@ -97,6 +143,19 @@ function mergeModels(file, env) {
     ...DEFAULT_MODELS,
     ...((file && file.models) || {}),
     ...((env && env.models) || {}),
+  };
+}
+
+// Per-mode hyperparameter merge. Same three-way logic as mergeModels but
+// merges INSIDE each mode object so a user can override (say) just
+// `params.code.max_tokens` without nuking temperature/top_p.
+function mergeParams(file) {
+  const filePartial = (file && file.params) || {};
+  return {
+    ask:     { ...DEFAULT_PARAMS.ask,     ...(filePartial.ask     || {}) },
+    code:    { ...DEFAULT_PARAMS.code,    ...(filePartial.code    || {}) },
+    review:  { ...DEFAULT_PARAMS.review,  ...(filePartial.review  || {}) },
+    consult: { ...DEFAULT_PARAMS.consult, ...(filePartial.consult || {}) },
   };
 }
 
@@ -113,12 +172,18 @@ export async function load() {
     const migrated = migrate(file);
     const merged = { ...DEFAULTS, ...migrated, ...(env ?? {}) };
     merged.models = mergeModels(migrated, env);
+    merged.params = mergeParams(migrated);
+    if (!Array.isArray(merged.stop_sequences)) {
+      merged.stop_sequences = [...DEFAULT_STOP_SEQUENCES];
+    }
     return merged;
   } catch (err) {
     if (err.code === 'ENOENT') {
       if (env) {
         const synth = { ...DEFAULTS, ...env };
         synth.models = mergeModels(null, env);
+        synth.params = mergeParams(null);
+        synth.stop_sequences = [...DEFAULT_STOP_SEQUENCES];
         return synth;
       }
       return null;
@@ -132,6 +197,10 @@ export async function save(cfg) {
   const migrated = migrate(cfg);
   const merged = { ...DEFAULTS, ...migrated };
   merged.models = mergeModels(migrated, null);
+  merged.params = mergeParams(migrated);
+  if (!Array.isArray(merged.stop_sequences)) {
+    merged.stop_sequences = [...DEFAULT_STOP_SEQUENCES];
+  }
   await fs.writeFile(CONFIG_PATH, JSON.stringify(merged, null, 2), { mode: 0o600 });
   try {
     await fs.chmod(CONFIG_PATH, 0o600);
@@ -148,5 +217,10 @@ export async function reset() {
 }
 
 export function defaults() {
-  return { ...DEFAULTS, models: { ...DEFAULT_MODELS } };
+  return {
+    ...DEFAULTS,
+    models: { ...DEFAULT_MODELS },
+    params: mergeParams(null),
+    stop_sequences: [...DEFAULT_STOP_SEQUENCES],
+  };
 }
