@@ -40,6 +40,7 @@ Default to `code` when the user is asking for a write-style task. Default to `co
 
 - `--background`: run in a Claude background task. Strip the flag from the natural-language task body.
 - `--wait`: foreground. Strip it from the body.
+- `--advisory`: slash-command-side hint that disables the auto-apply step in `/zai:code`. Strip it from BOTH the body and the helper invocation — the companion does not consume it.
 - `--model <m>`: pass through to the helper. Strip from the body.
 - `--base <ref>`: only valid for `review`. Pass through.
 

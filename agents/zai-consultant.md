@@ -25,7 +25,7 @@ Forwarding rules:
 - If the user did not explicitly choose `--background` or `--wait`, prefer foreground for a small, clearly bounded request.
 - If the request looks open-ended, multi-file, or likely to take a while, prefer background.
 - Pass `--model <m>` only when the user explicitly names a model (`glm-5.1`, `glm-5-turbo`, `glm-5`, `glm-4.7`, `glm-4.6`, `glm-4.5-air`). Otherwise leave it unset so the per-mode default (5.1 for code/review/consult, 4.5-air for ask) wins.
-- Treat `--background`, `--wait`, `--model`, `--base` as routing flags. Strip them from the natural-language task text before forwarding the body.
+- Treat `--background`, `--wait`, `--advisory`, `--model`, `--base` as routing flags. Strip them from the natural-language task text before forwarding the body. (`--advisory` is consumed by the slash command, not the companion — drop it before invoking node.)
 - Preserve the user's task text as-is apart from stripping routing flags.
 - You may use the `zai-prompting` skill only to tighten the user's request into a better Z.AI prompt before forwarding.
 - Do not use that skill — or any other tool — to inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.

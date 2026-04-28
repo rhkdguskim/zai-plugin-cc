@@ -52,7 +52,7 @@ Get a key from <https://z.ai/model-api>.
 |---|---|---|
 | `/zai:setup` | Register or refresh the API key | — |
 | `/zai:ask <message>` | Single-shot Q&A (≤120 words) | `glm-4.5-air` |
-| `/zai:code [--wait\|--background] [--model <id>] <task>` | Code generation / multi-file refactor | `glm-5.1` |
+| `/zai:code [--wait\|--background] [--advisory] [--model <id>] <task>` | Code generation / multi-file refactor — applies edits to the working tree | `glm-5.1` |
 | `/zai:review [--wait\|--background] [--base <ref>] [focus]` | Third-party diff review | `glm-5.1` |
 | `/zai:consult [--wait\|--background] <topic>` | Design / strategy consult | `glm-5.1` |
 | `/zai:status [job-id]` | List or inspect background jobs | — |
@@ -103,6 +103,37 @@ The runtime emits one of these on stdout/stderr — Claude Code reads only the b
 ```
 
 For terminal users who want the legacy human-readable footer back, every command accepts `--human`.
+
+## How `/zai:code` actually changes files
+
+`/zai:code` is **not** advisory by default — it edits the working tree. The flow:
+
+1. The companion calls GLM-5.1 with a system prompt that mandates a structured patch format. GLM emits zero or more `<zai_edit>` blocks (and nothing else).
+2. The slash command parses each block and applies it via Claude Code's own `Read` / `Edit` / `Write` / `rm` tools, which means every change still goes through Claude Code's normal permission flow.
+
+Patch shapes GLM emits:
+
+```text
+<zai_edit path="src/foo.ts" op="edit">
+<<<<<<< SEARCH
+exact text from the current file
+=======
+new text
+>>>>>>> REPLACE
+</zai_edit>
+
+<zai_edit path="src/new-file.ts" op="create">
+<<<<<<< CREATE
+full file contents
+>>>>>>> END
+</zai_edit>
+
+<zai_edit path="src/dead.ts" op="delete"/>
+```
+
+Pass `--advisory` to skip the apply step and just print the edit plan. Background jobs are advisory by default — the user has moved on, so `/zai:result <id>` shows the plan and the user decides what to do.
+
+If the SEARCH block doesn't match the file byte-for-byte (the apply tool fails closed in this case), the slash command reports the failed file path and continues with the remaining `<zai_edit>` blocks instead of guessing.
 
 ## Performance: parallel tool calling
 

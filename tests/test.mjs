@@ -163,11 +163,25 @@ await test('prompts.buildAsk produces system + user with no-preamble anchor', ()
   assert.equal(m[1].content, 'hello');
 });
 
-await test('prompts.buildCode anchors code-first output and language pin', () => {
+await test('prompts.buildCode mandates the <zai_edit> apply format', () => {
   const m = prompts.buildCode('refactor', 'context-blob');
   assert.match(m[0].content, /Mode: CODE/);
-  assert.match(m[0].content, /Match the user's language/);
-  assert.match(m[0].content, /code first/i);
+  // The system prompt must spell out the three ops and the aider markers
+  // verbatim, so GLM emits exactly what commands/code.md parses.
+  assert.match(m[0].content, /<zai_edit path=/);
+  assert.match(m[0].content, /op="edit"/);
+  assert.match(m[0].content, /op="create"/);
+  assert.match(m[0].content, /op="delete"/);
+  assert.match(m[0].content, /<<<<<<< SEARCH/);
+  assert.match(m[0].content, />>>>>>> REPLACE/);
+  assert.match(m[0].content, /<<<<<<< CREATE/);
+  assert.match(m[0].content, />>>>>>> END/);
+  assert.match(m[0].content, /<zai_clarify>/);
+  // The code-mode override must explicitly forbid bare fenced blocks
+  // (BASE allows them for prose modes; code mode only emits <zai_edit>).
+  assert.match(m[0].content, /NO fenced code blocks outside <zai_edit>/);
+  assert.match(m[0].content, /Speak in patches, not in prose/);
+  // User content still carries the context blob.
   assert.equal(m[1].role, 'user');
   assert.match(m[1].content, /context-blob/);
 });

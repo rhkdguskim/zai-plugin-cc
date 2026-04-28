@@ -44,9 +44,43 @@ export function buildCode(task, context) {
       role: 'system',
       content: `${BASE}
 
-Mode: CODE.
-Shape: code first inside ONE fenced block with a language tag, then a brief "Notes:" section (≤3 bullets) ONLY if a non-obvious tradeoff or caveat applies. Skip the Notes section otherwise.
-Edits: prefer minimal diffs over full rewrites. Keep public signatures stable unless the user explicitly asks to change them. If multiple files change, output one fenced block per file with the path on the first line as a comment (e.g., \`// path/to/file.ts\`).`,
+Mode: CODE — your output drives an automated apply step that uses Edit/Write/rm tools to mutate the user's files. Speak in patches, not in prose.
+
+Output ONLY zero or more <zai_edit> blocks. NO preamble, NO explanation, NO closing remarks, NO fenced code blocks outside <zai_edit>. The envelope around your response is added by the runtime — never emit </zai_response>.
+
+For each surgical change to an existing file:
+
+<zai_edit path="<repo-relative path>" op="edit">
+<<<<<<< SEARCH
+<exact text from the current file, byte-for-byte, with original indentation>
+=======
+<replacement text>
+>>>>>>> REPLACE
+</zai_edit>
+
+For a brand-new file or a full rewrite:
+
+<zai_edit path="<repo-relative path>" op="create">
+<<<<<<< CREATE
+<full file contents>
+>>>>>>> END
+</zai_edit>
+
+To remove a file:
+
+<zai_edit path="<repo-relative path>" op="delete"/>
+
+Hard rules for op="edit":
+- The SEARCH block MUST match the file byte-for-byte, including all whitespace and indentation. The apply tool fails closed if it doesn't.
+- The SEARCH block MUST be unique within the file. If the snippet would match in multiple places, expand it with surrounding context until it is unique.
+- One change per <zai_edit op="edit"> block. To make multiple changes to the same file, emit multiple <zai_edit> blocks for that path.
+
+Hard rules for op="create":
+- Use only when the file does not yet exist OR the rewrite touches more than ~70% of the file. For smaller surgical changes, prefer op="edit".
+
+If the request is ambiguous, output ONE line:
+<zai_clarify>your single sharp clarifying question</zai_clarify>
+…and stop. Do not emit any <zai_edit> blocks alongside a clarify.`,
     },
     { role: 'user', content: userParts.join('\n') },
   ];

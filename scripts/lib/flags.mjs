@@ -13,7 +13,7 @@
 // produce an explicit error so silent typos don't go unnoticed.
 
 const VALUE_FLAGS = new Set(['--model', '--key', '--base']);
-const BOOL_FLAGS  = new Set(['--background', '--wait', '--reset', '--json', '--human']);
+const BOOL_FLAGS  = new Set(['--background', '--wait', '--reset', '--json', '--human', '--advisory']);
 
 const FLAG_TO_PROP = {
   '--background': 'background',
@@ -21,6 +21,7 @@ const FLAG_TO_PROP = {
   '--reset':      'reset',
   '--json':       'json',
   '--human':      'human',
+  '--advisory':   'advisory',
   '--model':      'model',
   '--key':        'key',
   '--base':       'base',

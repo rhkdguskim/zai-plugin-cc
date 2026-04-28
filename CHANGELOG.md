@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-28
+
+### Changed
+- **`/zai:code` now applies edits to the working tree.** Previously it printed code that the user had to paste manually. The slash command now parses GLM's `<zai_edit>` patches and applies them via Claude Code's `Read` / `Edit` / `Write` / `rm` tools, going through the normal permission flow.
+
+### Added
+- New patch format produced by GLM in code mode: `<zai_edit path="…" op="edit|create|delete">` with aider-style `<<<<<<< SEARCH … ======= … >>>>>>> REPLACE` and `<<<<<<< CREATE … >>>>>>> END` markers. Self-closing form for delete.
+- `--advisory` flag on `/zai:code` to opt out of auto-apply and just print the plan.
+- `<zai_clarify>question</zai_clarify>` block lets GLM ask one sharp clarifying question instead of guessing edits.
+
+### Fixed
+- `commands/code.md` had `Do NOT implement the task yourself` baked in and omitted `Edit`/`Write` from `allowed-tools`, so the slash command could never actually apply edits even if Claude wanted to. Both fixed.
+
+## [0.2.0] - 2026-04-27
+
 ### Added
 - Per-mode model map (`models.{ask,code,review,consult}`) with v2→v3 config migration (`06c8bd4`)
 - SessionEnd hook (`hooks/hooks.json`) calling internal `__reconcile` (`5371f03`)
