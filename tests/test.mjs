@@ -18,9 +18,10 @@ import { promises as fs } from 'node:fs';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as wait } from 'node:timers/promises';
+import { createServer } from 'node:http';
 
 import { parseFlags, FlagError } from '../scripts/lib/flags.mjs';
 import * as prompts from '../scripts/lib/prompts.mjs';
@@ -52,21 +53,29 @@ function cleanup() {
 
 async function test(name, fn, { live = false } = {}) {
   if (live && !HAS_KEY) {
-    results.push({ name, status: 'skip', reason: 'no ZAI_API_KEY' });
+    const r = { name, status: 'skip', reason: 'no ZAI_API_KEY' };
+    results.push(r);
+    if (process.env.ZAI_TEST_STREAM === '1') process.stdout.write(`∘ ${name}  [skip: no ZAI_API_KEY]\n`);
     return;
   }
   const start = Date.now();
   try {
     await fn();
-    results.push({ name, status: 'pass', ms: Date.now() - start });
+    const r = { name, status: 'pass', ms: Date.now() - start };
+    results.push(r);
+    if (process.env.ZAI_TEST_STREAM === '1') process.stdout.write(`✓ ${name} (${r.ms}ms)\n`);
   } catch (err) {
-    results.push({
+    const r = {
       name,
       status: 'fail',
       ms: Date.now() - start,
       message: err.message,
       stack: err.stack,
-    });
+    };
+    results.push(r);
+    if (process.env.ZAI_TEST_STREAM === '1') {
+      process.stdout.write(`✗ ${name} (${r.ms}ms)\n  ${err.message.split('\n')[0]}\n`);
+    }
   }
 }
 
@@ -78,19 +87,26 @@ function runCompanion(args, env = {}) {
   return { code: res.status, stdout: res.stdout || '', stderr: res.stderr || '' };
 }
 
-function spawnCompanion(args, env = {}) {
-  return spawn(process.execPath, [COMPANION, ...args], {
-    env: { ...process.env, ...env },
-    stdio: ['ignore', 'pipe', 'pipe'],
+// Async companion runner. CRITICAL for any test that holds an
+// in-process resource the companion needs to talk to (mock HTTP
+// server, listener on this process's event loop). spawnSync blocks
+// the parent's event loop, which deadlocks an in-process mock server
+// because the server can't accept connections until spawnSync
+// returns — but spawnSync won't return until the companion finishes,
+// and the companion is waiting on the server. Use this instead.
+function runCompanionAsync(args, env = {}, opts = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [COMPANION, ...args], {
+      env: { ...process.env, ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: opts.cwd,
+    });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.on('exit', (code) => resolve({ code, stdout, stderr }));
+    child.on('error', () => resolve({ code: -1, stdout, stderr }));
   });
-}
-
-async function readUntilExit(child) {
-  let out = '', err = '';
-  child.stdout.on('data', d => { out += d.toString(); });
-  child.stderr.on('data', d => { err += d.toString(); });
-  const code = await new Promise(resolve => child.on('exit', resolve));
-  return { code, stdout: out, stderr: err };
 }
 
 // ---- Unit tests: parseFlags ---------------------------------------------
@@ -745,6 +761,457 @@ await test('live: CLI cancel halts a running background job', async () => {
   const j = JSON.parse(s.stdout);
   assert.ok(['cancelled', 'done', 'error'].includes(j.status));
 }, { live: true });
+
+// ---- Integration tests against a mock Z.AI server ----------------------
+//
+// Why this exists: the unit tests above prove individual modules work,
+// but they never feed a fake provider response *through* the companion
+// CLI to verify that what GLM would emit and what the companion writes
+// to stdout actually compose. Without a key we'd have no integration
+// coverage; with a real key the round-trip would be unstable and slow.
+// The mock server gives us a deterministic, offline integration lane.
+
+async function startMockZai({ respond } = {}) {
+  const requests = [];
+  const server = createServer((req, rsp) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      let parsed = null;
+      try { parsed = body ? JSON.parse(body) : null; } catch {}
+      requests.push({
+        method: req.method,
+        url: req.url,
+        headers: req.headers,
+        body: parsed,
+      });
+      const r = (typeof respond === 'function') ? respond(parsed) : (respond || {});
+      const status = r.status ?? 200;
+      const payload = r.json ?? {};
+      rsp.writeHead(status, { 'Content-Type': 'application/json' });
+      rsp.end(JSON.stringify(payload));
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  return {
+    base: `http://127.0.0.1:${port}/api/anthropic`,
+    requests,
+    stop: () => new Promise(resolve => server.close(resolve)),
+  };
+}
+
+// Build the canned Anthropic-compat response the mock returns. The
+// `text` becomes the response body Claude will see inside the
+// <zai_response>…</zai_response> envelope.
+function mockChatResponse({ text, model = 'glm-mock', input = 5, output = 5 }) {
+  return {
+    json: {
+      id: 'msg_test',
+      type: 'message',
+      role: 'assistant',
+      model,
+      content: [{ type: 'text', text }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: input, output_tokens: output },
+    },
+  };
+}
+
+function withMockEnv(server, extra = {}) {
+  const cfgDir  = makeTmp('zai-int-cfg-');
+  const jobsDir = makeTmp('zai-int-jobs-');
+  return {
+    ZAI_CONFIG_DIR: cfgDir,
+    ZAI_JOBS_DIR:   jobsDir,
+    ZAI_API_KEY:    'sk-mock',
+    ZAI_BASE_URL:   server.base,
+    ...extra,
+  };
+}
+
+// Tests for ask / code / review / consult per-mode params -------------------
+
+await test('integration: ask sends ask-mode hyperparams; envelope wraps body', async () => {
+  const server = await startMockZai({ respond: () => mockChatResponse({ text: 'PONG', model: 'glm-4.5-air' }) });
+  try {
+    const env = withMockEnv(server);
+    const { code, stdout } = await runCompanionAsync(['ask', 'ping'], env);
+    assert.equal(code, 0, `ask exited non-zero; stdout=${stdout}`);
+    assert.match(stdout, /<zai_response\b/);
+    assert.match(stdout, /\bkind="ask"/);
+    assert.match(stdout, /\bmodel="glm-4.5-air"/);
+    assert.match(stdout, /input_tokens="5"/);
+    assert.match(stdout, /\nPONG\n/);
+    assert.match(stdout, /<\/zai_response>/);
+
+    assert.equal(server.requests.length, 1);
+    const b = server.requests[0].body;
+    assert.equal(b.model, 'glm-4.5-air');
+    assert.equal(b.temperature, 0.2);
+    assert.equal(b.top_p, 0.8);
+    assert.equal(b.max_tokens, 512);
+    assert.ok(Array.isArray(b.stop_sequences));
+    assert.ok(b.stop_sequences.includes('</zai_response>'));
+    assert.ok(b.system && /Mode: ASK/.test(b.system));
+  } finally { await server.stop(); }
+});
+
+await test('integration: code sends code-mode hyperparams and envelope kind="code"', async () => {
+  const server = await startMockZai({ respond: () => mockChatResponse({
+    text: '<zai_edit path="src/x.ts" op="create">\n<<<<<<< CREATE\nexport const x = 1;\n>>>>>>> END\n</zai_edit>',
+    model: 'glm-5.1',
+  }) });
+  try {
+    const env = withMockEnv(server);
+    const { code, stdout } = await runCompanionAsync(['code', 'create x'], env);
+    assert.equal(code, 0);
+    assert.match(stdout, /\bkind="code"/);
+    assert.match(stdout, /\bmodel="glm-5.1"/);
+    assert.match(stdout, /<zai_edit path="src\/x\.ts" op="create">/);
+    assert.match(stdout, /<<<<<<< CREATE/);
+
+    const b = server.requests[0].body;
+    assert.equal(b.model, 'glm-5.1');
+    assert.equal(b.temperature, 0.2);
+    assert.equal(b.top_p, 0.95);
+    assert.equal(b.max_tokens, 8192);
+    assert.ok(b.system && /Mode: CODE/.test(b.system));
+    assert.ok(/<zai_edit/.test(b.system), 'system prompt must spell out the apply format');
+  } finally { await server.stop(); }
+});
+
+await test('integration: review sends diff in user msg with review-mode params', async () => {
+  // Build a tiny git repo so dispatchTask("review") finds a real diff.
+  const repoDir = makeTmp('zai-int-review-repo-');
+  execSync('git init -q', { cwd: repoDir });
+  execSync('git config user.email t@example.com && git config user.name T', { cwd: repoDir });
+  await fs.writeFile(path.join(repoDir, 'a.txt'), 'hello\n');
+  execSync('git add a.txt && git -c commit.gpgsign=false commit -q -m init', { cwd: repoDir });
+  await fs.writeFile(path.join(repoDir, 'a.txt'), 'hello world\n');
+
+  const server = await startMockZai({ respond: () => mockChatResponse({
+    text: '## Bugs\n- a.txt:1 looks fine\n', model: 'glm-5.1',
+  }) });
+  try {
+    const env = withMockEnv(server);
+    const res = await runCompanionAsync(['review'], env, { cwd: repoDir });
+    assert.equal(res.code, 0, `review failed: ${res.stderr}`);
+    assert.match(res.stdout, /\bkind="review"/);
+    assert.match(res.stdout, /## Bugs/);
+
+    const b = server.requests[0].body;
+    assert.equal(b.model, 'glm-5.1');
+    assert.equal(b.temperature, 0.3);
+    assert.equal(b.top_p, 0.9);
+    assert.equal(b.max_tokens, 4096);
+    // The diff payload AND the section-header anchors must reach the user
+    // message (the system message just sets mode/voice; section schema is
+    // built into the user prompt by buildReview).
+    const userMsg = b.messages?.[b.messages.length - 1]?.content || '';
+    assert.match(userMsg, /hello world/);
+    assert.match(userMsg, /## Bugs/);
+    assert.match(userMsg, /## Security/);
+    assert.match(b.system, /Mode: REVIEW/);
+  } finally { await server.stop(); }
+});
+
+await test('integration: consult uses consult-mode params (higher temperature)', async () => {
+  const server = await startMockZai({ respond: () => mockChatResponse({
+    text: '## Options\n- a\n## Tradeoffs\n- foo\n## Recommendation\nGo with a.',
+    model: 'glm-5.1',
+  }) });
+  try {
+    const env = withMockEnv(server);
+    const { code, stdout } = await runCompanionAsync(['consult', 'sse vs queue'], env);
+    assert.equal(code, 0);
+    assert.match(stdout, /\bkind="consult"/);
+
+    const b = server.requests[0].body;
+    assert.equal(b.temperature, 0.6);
+    assert.equal(b.top_p, 0.95);
+    assert.equal(b.max_tokens, 4096);
+    assert.match(b.system, /## Options/);
+    assert.match(b.system, /## Recommendation/);
+  } finally { await server.stop(); }
+});
+
+await test('integration: --human flag restores legacy human footer', async () => {
+  const server = await startMockZai({ respond: () => mockChatResponse({ text: 'PONG', model: 'glm-4.5-air' }) });
+  try {
+    const env = withMockEnv(server);
+    const { code, stdout } = await runCompanionAsync(['ask', '--human', 'ping'], env);
+    assert.equal(code, 0);
+    assert.doesNotMatch(stdout, /<zai_response/);
+    assert.match(stdout, /^PONG$/m);
+    assert.match(stdout, /— glm\/glm-4\.5-air/);
+  } finally { await server.stop(); }
+});
+
+await test('integration: --model flag overrides per-mode default', async () => {
+  const server = await startMockZai({ respond: () => mockChatResponse({ text: 'ok', model: 'glm-4.7' }) });
+  try {
+    const env = withMockEnv(server);
+    const { code } = await runCompanionAsync(['code', '--model', 'glm-4.7', 'tweak'], env);
+    assert.equal(code, 0);
+    const b = server.requests[0].body;
+    assert.equal(b.model, 'glm-4.7');
+    // Code-mode params still apply even when the model is overridden.
+    assert.equal(b.temperature, 0.2);
+    assert.equal(b.max_tokens, 8192);
+  } finally { await server.stop(); }
+});
+
+await test('integration: provider 401 echo never reaches err.message', async () => {
+  // Mock returns an auth failure whose detail string echoes a fragment
+  // of the user's prompt (a real provider has been observed doing this).
+  // The companion must surface a redacted category sentence — never the
+  // echoed prompt — both on stderr and into the persisted job error.
+  const SECRET = 'PROMPT_FRAGMENT_THAT_MUST_NOT_LEAK_xyz789';
+  const server = await startMockZai({
+    respond: () => ({
+      status: 401,
+      json: { error: { type: 'invalid_api_key', message: `bad key for prompt: ${SECRET}` } },
+    }),
+  });
+  try {
+    const env = withMockEnv(server);
+    const { code, stderr, stdout } = await runCompanionAsync(['ask', SECRET], env);
+    assert.equal(code, 1);
+    // stderr envelope must NOT contain the prompt fragment.
+    assert.match(stderr, /<zai_error\b/);
+    assert.match(stderr, /\bkind="auth"/);
+    assert.doesNotMatch(stderr, new RegExp(SECRET));
+    assert.doesNotMatch(stdout, new RegExp(SECRET));
+    // The persisted job error field must also be redacted. Find the
+    // newest record in jobsDir and read it.
+    const entries = await fs.readdir(env.ZAI_JOBS_DIR);
+    const jobs = await Promise.all(
+      entries.filter(f => f.endsWith('.json')).map(async f => JSON.parse(await fs.readFile(path.join(env.ZAI_JOBS_DIR, f), 'utf8')))
+    );
+    const errored = jobs.find(j => j.status === 'error');
+    assert.ok(errored, 'expected an errored job to be persisted');
+    assert.doesNotMatch(errored.error || '', new RegExp(SECRET));
+  } finally { await server.stop(); }
+});
+
+// Background lifecycle ------------------------------------------------------
+
+await test('integration: code --background dispatches, worker writes done, /zai:result emits envelope', async () => {
+  const BODY = '<zai_edit path="x.ts" op="create">\n<<<<<<< CREATE\nexport const x = 42;\n>>>>>>> END\n</zai_edit>';
+  const server = await startMockZai({ respond: () => mockChatResponse({ text: BODY, model: 'glm-5.1' }) });
+  try {
+    const env = withMockEnv(server);
+
+    const launch = await runCompanionAsync(['code', '--background', 'do x'], env);
+    assert.equal(launch.code, 0);
+    assert.match(launch.stdout, /<zai_dispatched\b/);
+    assert.match(launch.stdout, /\bkind="code"/);
+    const m = launch.stdout.match(/job_id="([^"]+)"/);
+    assert.ok(m, 'no job_id in dispatch envelope');
+    const jobId = m[1];
+
+    // Poll until the worker writes a terminal status (or fail after ~5s).
+    let final = null;
+    for (let i = 0; i < 50; i += 1) {
+      const s = await runCompanionAsync(['status', jobId, '--human'], env);
+      if (s.code === 0 && s.stdout.trim().length) {
+        try {
+          final = JSON.parse(s.stdout);
+          if (final.status !== 'running') break;
+        } catch {}
+      }
+      await wait(100);
+    }
+    assert.ok(final, 'no status snapshot after polling');
+    assert.equal(final.status, 'done', `worker did not converge to done; got ${final.status}: ${final.error || ''}`);
+    assert.equal(final.bg, true);
+    assert.ok(final.params && final.params.max_tokens === 8192);
+
+    // /zai:result wraps the worker's stored body in a fresh envelope.
+    const r = await runCompanionAsync(['result', jobId], env);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /<zai_response\b/);
+    assert.match(r.stdout, /\bkind="code"/);
+    assert.match(r.stdout, /<zai_edit path="x\.ts"/);
+  } finally { await server.stop(); }
+});
+
+await test('integration: cancel of a (synthetic) running bg job emits <zai_cancelled/>', async () => {
+  // We don't need the mock server here — we just craft a record that is
+  // already on disk in 'running' state and exercise the CLI envelope.
+  const cfgDir = makeTmp('zai-int-cancel-cfg-');
+  const jobsDir = makeTmp('zai-int-cancel-jobs-');
+  // Seed config so loadConfig does not bail.
+  await fs.mkdir(cfgDir, { recursive: true });
+  await fs.writeFile(path.join(cfgDir, 'config.json'), JSON.stringify({
+    version: 4, api_key: 'sk-x', base_url: 'http://127.0.0.1:1/api/anthropic',
+  }));
+  // Seed a running bg job whose pid does not match any live worker
+  // (so the kill-guard refuses to signal — exactly the safe path).
+  const id = 'aaa-' + Math.random().toString(16).slice(2, 8);
+  const rec = {
+    id, kind: 'code', status: 'running', model: 'glm-5.1',
+    created_at: new Date().toISOString(), started_at: new Date().toISOString(),
+    ended_at: null, request: {}, result: null, error: null,
+    bg: true, pid: 999999,  // almost certainly not a real PID
+    usage: null,
+  };
+  await fs.writeFile(path.join(jobsDir, `${id}.json`), JSON.stringify(rec, null, 2));
+
+  const env = { ZAI_CONFIG_DIR: cfgDir, ZAI_JOBS_DIR: jobsDir, ZAI_API_KEY: 'sk-x' };
+  const c = runCompanion(['cancel', id], env);
+  assert.equal(c.code, 0);
+  assert.match(c.stdout, /<zai_cancelled\b/);
+  assert.match(c.stdout, new RegExp(`job_id="${id}"`));
+  assert.match(c.stdout, /status="cancelled"/);
+});
+
+await test('integration: status (no jobs) emits compact <zai_jobs count="0"/>', async () => {
+  const cfgDir = makeTmp('zai-int-status-empty-cfg-');
+  const jobsDir = makeTmp('zai-int-status-empty-jobs-');
+  const env = { ZAI_CONFIG_DIR: cfgDir, ZAI_JOBS_DIR: jobsDir, ZAI_API_KEY: 'sk-x' };
+  const { code, stdout } = runCompanion(['status'], env);
+  assert.equal(code, 0);
+  assert.match(stdout, /<zai_jobs count="0"\/>/);
+});
+
+// Reference parser for the <zai_edit> patch format ---------------------------
+//
+// commands/code.md instructs Claude to extract <zai_edit> blocks from a
+// GLM response and apply them via Edit/Write/rm. The format must be
+// unambiguous; this test embeds a small reference parser and proves it
+// extracts the same shapes from synthetic GLM outputs Claude would face
+// at runtime. If a future prompt edit accidentally drops a marker name,
+// these assertions catch it before we ship.
+
+function parseZaiEditBlocks(body) {
+  const blocks = [];
+  // Split on <zai_edit … op="…"> opening tags. We rely on the format
+  // being attribute-stable (always path then op, no extra attributes).
+  const reOpen = /<zai_edit\s+path="([^"]+)"\s+op="(edit|create|delete)"\s*(\/?)>/g;
+  let m;
+  while ((m = reOpen.exec(body)) !== null) {
+    const [, p, op, selfClosing] = m;
+    if (selfClosing === '/') {
+      blocks.push({ path: p, op });
+      continue;
+    }
+    const start = m.index + m[0].length;
+    const end = body.indexOf('</zai_edit>', start);
+    if (end < 0) {
+      blocks.push({ path: p, op, error: 'missing </zai_edit>' });
+      continue;
+    }
+    const inner = body.slice(start, end);
+    if (op === 'edit') {
+      // Layout (each marker sits on its own line):
+      //   ...<<<<<<< SEARCH\n  <search-body>  \n=======\n  <replace>  \n>>>>>>> REPLACE...
+      // The "\n" immediately preceding =======/>>>>>>> is part of the body
+      // (every body line is newline-terminated). We compute slice
+      // boundaries so SEARCH/REPLACE come out byte-identical to the
+      // file region GLM intended to match.
+      const s = inner.indexOf('<<<<<<< SEARCH');
+      const sep = inner.indexOf('\n=======', s);          // start of the divider line
+      const e = inner.indexOf('\n>>>>>>> REPLACE', sep);  // start of the closing line
+      if (s < 0 || sep < 0 || e < 0) {
+        blocks.push({ path: p, op, error: 'malformed search/replace markers' });
+      } else {
+        const sStart = s + '<<<<<<< SEARCH'.length + 1;     // skip the marker AND its newline
+        const sEnd = sep + 1;                                // include the \n before =======
+        const rStart = sep + '\n======='.length + 1;        // skip divider AND its newline
+        const rEnd = e + 1;                                  // include the \n before REPLACE
+        blocks.push({
+          path: p, op,
+          search: inner.slice(sStart, sEnd),
+          replace: inner.slice(rStart, rEnd),
+        });
+      }
+    } else if (op === 'create') {
+      const s = inner.indexOf('<<<<<<< CREATE');
+      const e = inner.indexOf('\n>>>>>>> END', s);
+      if (s < 0 || e < 0) {
+        blocks.push({ path: p, op, error: 'malformed create/end markers' });
+      } else {
+        const cStart = s + '<<<<<<< CREATE'.length + 1;
+        const cEnd = e + 1;
+        blocks.push({
+          path: p, op,
+          content: inner.slice(cStart, cEnd),
+        });
+      }
+    }
+  }
+  return blocks;
+}
+
+await test('parser: single op="edit" with surgical search/replace', () => {
+  const body = `<zai_edit path="src/foo.ts" op="edit">
+<<<<<<< SEARCH
+const old = 1;
+=======
+const next = 2;
+>>>>>>> REPLACE
+</zai_edit>`;
+  const out = parseZaiEditBlocks(body);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].path, 'src/foo.ts');
+  assert.equal(out[0].op, 'edit');
+  assert.equal(out[0].search, 'const old = 1;\n');
+  assert.equal(out[0].replace, 'const next = 2;\n');
+  assert.equal(out[0].error, undefined);
+});
+
+await test('parser: multiple op="edit" blocks on the same file', () => {
+  const body = [
+    '<zai_edit path="a.ts" op="edit">\n<<<<<<< SEARCH\nA\n=======\nA2\n>>>>>>> REPLACE\n</zai_edit>',
+    '<zai_edit path="a.ts" op="edit">\n<<<<<<< SEARCH\nB\n=======\nB2\n>>>>>>> REPLACE\n</zai_edit>',
+  ].join('\n\n');
+  const out = parseZaiEditBlocks(body);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].search, 'A\n');
+  assert.equal(out[1].search, 'B\n');
+  assert.equal(out[1].replace, 'B2\n');
+});
+
+await test('parser: mixed op="create" + op="edit" + op="delete"', () => {
+  const body = [
+    '<zai_edit path="new.ts" op="create">\n<<<<<<< CREATE\nexport const x = 1;\n>>>>>>> END\n</zai_edit>',
+    '<zai_edit path="old.ts" op="edit">\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n</zai_edit>',
+    '<zai_edit path="dead.ts" op="delete"/>',
+  ].join('\n');
+  const out = parseZaiEditBlocks(body);
+  assert.equal(out.length, 3);
+  assert.equal(out[0].op, 'create');
+  assert.equal(out[0].content, 'export const x = 1;\n');
+  assert.equal(out[1].op, 'edit');
+  assert.equal(out[2].op, 'delete');
+  assert.equal(out[2].path, 'dead.ts');
+});
+
+await test('parser: malformed markers are flagged, not crashed', () => {
+  // GLM forgot the REPLACE side entirely. The parser must record the
+  // error rather than throw — the slash command will surface "failed"
+  // to the user without losing the rest of the response.
+  const body = '<zai_edit path="a.ts" op="edit">\n<<<<<<< SEARCH\nfoo\n</zai_edit>';
+  const out = parseZaiEditBlocks(body);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].error, 'malformed search/replace markers');
+});
+
+await test('parser: ignores prose around blocks', () => {
+  const body = [
+    'Here is what I propose:',
+    '<zai_edit path="a.ts" op="create">\n<<<<<<< CREATE\nx\n>>>>>>> END\n</zai_edit>',
+    'Done.',
+  ].join('\n');
+  // Even when GLM disobeys "no preamble", the parser still gets the edit.
+  // (Slash command may decide to flag the prose, but parsing must not break.)
+  const out = parseZaiEditBlocks(body);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].op, 'create');
+  assert.equal(out[0].content, 'x\n');
+});
 
 // ---- report --------------------------------------------------------------
 

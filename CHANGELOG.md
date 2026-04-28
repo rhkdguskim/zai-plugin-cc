@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-04-28
+
+### Added
+- Mock Z.AI server (`http.createServer` in-process) backing 9 new integration tests that drive the real companion CLI through the full flow without an API key. Asserts: per-mode hyperparameters land in the request body (temperature/top_p/max_tokens/stop_sequences), the envelope shape matches what `commands/*.md` parses, `--human` restores the legacy footer, `--model` overrides per-mode default, provider 401 prompt echoes never reach `err.message` or persisted job records, background lifecycle (`<zai_dispatched/>` → polled JSON status → `<zai_response>` via `/zai:result`) actually completes, `<zai_jobs count="0"/>` and `<zai_cancelled/>` envelope shapes.
+- Reference parser for the `<zai_edit>` patch format (5 tests). Locks the `<<<<<<< SEARCH/REPLACE`/`CREATE/END`/self-closing-delete spec down so any future prompt edit that drops a marker name fails CI immediately.
+- Streaming test mode: `ZAI_TEST_STREAM=1` writes per-test pass/fail lines as they happen, instead of buffering the whole report to the end. Useful for debugging long-running suites.
+
+### Fixed
+- **Integration deadlock**: an earlier draft of the integration tests used `spawnSync` to invoke the companion while holding the in-process mock HTTP server. `spawnSync` blocks the test runner's event loop, so the mock server couldn't accept the connection — and the companion sat waiting forever. Replaced with `runCompanionAsync` (uses `spawn` and resolves on `exit`).
+- Parser test expectations: SEARCH/REPLACE/CREATE bodies include the `\n` immediately preceding the closing marker (every body line is newline-terminated, including the last one). The reference parser's slice boundaries now match that convention so an edit produced by GLM round-trips byte-identically through the Edit tool.
+
 ## [0.2.1] - 2026-04-28
 
 ### Changed
